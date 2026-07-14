@@ -90,7 +90,7 @@ The application can start without cloud credentials so its public catalogue and 
 ### Firebase Google Sign-In
 
 1. Create a Firebase project and web app.
-2. Enable the Google provider in Firebase Authentication.
+2. Enable Google provider at Sign-in method in Firebase Authentication.
 3. Add `localhost` as an authorized domain.
 4. Create a Firebase service account and set:
    - `FIREBASE_PROJECT_ID`
