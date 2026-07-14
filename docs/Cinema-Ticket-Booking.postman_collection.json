@@ -1,0 +1,43 @@
+{
+  "info": {
+    "name": "Cinema Ticket Booking",
+    "description": "Required REST API. Set firebase_token after signing in through Firebase; direct OAuth uses browser cookies and CSRF.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8080/api/v1" },
+    { "key": "firebase_token", "value": "" },
+    { "key": "movie_id", "value": "650000000000000000000001" },
+    { "key": "showtime_id", "value": "650000000000000000000064" },
+    { "key": "seat_id", "value": "6500000000000000000003e9" },
+    { "key": "hold_id", "value": "" },
+    { "key": "booking_id", "value": "" }
+  ],
+  "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{firebase_token}}", "type": "string" }] },
+  "item": [
+    { "name": "Authentication", "item": [
+      { "name": "Firebase session", "request": { "method": "POST", "url": "{{base_url}}/auth/session" } },
+      { "name": "Me", "request": { "method": "GET", "url": "{{base_url}}/auth/me" } },
+      { "name": "Direct Google OAuth", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/auth/google/start?return_to=/" } }
+    ] },
+    { "name": "Catalogue", "item": [
+      { "name": "Movies", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/movies" } },
+      { "name": "Movie", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/movies/{{movie_id}}" } },
+      { "name": "Showtimes", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/movies/{{movie_id}}/showtimes" } },
+      { "name": "Seat map", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/showtimes/{{showtime_id}}/seats" } }
+    ] },
+    { "name": "Booking flow", "item": [
+      { "name": "Create hold", "request": { "method": "POST", "header": [{ "key": "Idempotency-Key", "value": "{{$guid}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"seat_ids\": [\"{{seat_id}}\"]\n}" }, "url": "{{base_url}}/showtimes/{{showtime_id}}/holds" } },
+      { "name": "Get hold", "request": { "method": "GET", "url": "{{base_url}}/holds/{{hold_id}}" } },
+      { "name": "Confirm hold", "request": { "method": "POST", "header": [{ "key": "Idempotency-Key", "value": "{{$guid}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"payment_method\": \"MOCK\"\n}" }, "url": "{{base_url}}/holds/{{hold_id}}/confirm" } },
+      { "name": "Release hold", "request": { "method": "DELETE", "url": "{{base_url}}/holds/{{hold_id}}" } },
+      { "name": "My bookings", "request": { "method": "GET", "url": "{{base_url}}/bookings/me" } },
+      { "name": "Booking detail", "request": { "method": "GET", "url": "{{base_url}}/bookings/{{booking_id}}" } }
+    ] },
+    { "name": "Admin", "item": [
+      { "name": "Bookings filtered by status", "request": { "method": "GET", "url": "{{base_url}}/admin/bookings?booking_status=CONFIRMED" } },
+      { "name": "Audit logs", "request": { "method": "GET", "url": "{{base_url}}/admin/audit-logs" } }
+    ] }
+  ]
+}
+

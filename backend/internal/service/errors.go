@@ -1,0 +1,16 @@
+package service
+
+import "fmt"
+
+type Error struct {
+	Status  int
+	Code    string
+	Message string
+	Details map[string]any
+}
+
+func (e *Error) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message) }
+
+func problem(status int, code, message string, details map[string]any) *Error {
+	return &Error{Status: status, Code: code, Message: message, Details: details}
+}

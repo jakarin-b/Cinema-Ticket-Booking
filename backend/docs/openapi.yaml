@@ -1,0 +1,391 @@
+openapi: 3.1.0
+info:
+  title: Cinema Ticket Booking API
+  version: 1.0.0
+  description: Concurrency-safe cinema seat holding and booking API.
+servers:
+  - url: http://localhost:8080
+    description: Direct local API
+  - url: http://localhost:3000
+    description: Frontend reverse proxy
+tags:
+  - name: Authentication
+  - name: Catalogue
+  - name: Holds
+  - name: Bookings
+  - name: Admin
+  - name: Health
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Process liveness
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Dependency readiness
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/auth/session:
+    post:
+      tags: [Authentication]
+      summary: Verify Firebase token and upsert the user
+      security: [{ FirebaseBearer: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/auth/me:
+    get:
+      tags: [Authentication]
+      summary: Current user and authentication method
+      security: [{ FirebaseBearer: [] }, { OAuthSession: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/auth/google/start:
+    get:
+      tags: [Authentication]
+      summary: Start direct Google OpenID Connect authorization
+      parameters:
+        - in: query
+          name: return_to
+          schema: { type: string, default: / }
+      responses:
+        '302': { description: Redirect to Google authorization endpoint }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/auth/google/callback:
+    get:
+      tags: [Authentication]
+      summary: Validate Google callback and create an application session
+      parameters:
+        - { in: query, name: state, required: true, schema: { type: string } }
+        - { in: query, name: code, required: true, schema: { type: string } }
+      responses:
+        '302': { description: Redirect to frontend auth callback }
+  /api/v1/auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Delete a direct OAuth session or clear frontend Firebase state
+      security: [{ FirebaseBearer: [] }, { OAuthSession: [] }]
+      parameters:
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+  /api/v1/movies:
+    get:
+      tags: [Catalogue]
+      summary: List active movies
+      responses:
+        '200':
+          description: Active movies
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MovieListEnvelope' }
+  /api/v1/movies/{movieId}:
+    get:
+      tags: [Catalogue]
+      summary: Movie details
+      parameters: [{ $ref: '#/components/parameters/MovieID' }]
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/movies/{movieId}/showtimes:
+    get:
+      tags: [Catalogue]
+      summary: Future showtimes for a movie
+      parameters: [{ $ref: '#/components/parameters/MovieID' }]
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+  /api/v1/showtimes/{showtimeId}:
+    get:
+      tags: [Catalogue]
+      summary: Showtime, movie, and auditorium details
+      parameters: [{ $ref: '#/components/parameters/ShowtimeID' }]
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/showtimes/{showtimeId}/seats:
+    get:
+      tags: [Catalogue]
+      summary: Authoritative showtime seat map
+      parameters: [{ $ref: '#/components/parameters/ShowtimeID' }]
+      responses:
+        '200':
+          description: Showtime seats
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SeatListEnvelope' }
+  /api/v1/ws/showtimes/{showtimeId}:
+    get:
+      tags: [Catalogue]
+      summary: WebSocket snapshot and incremental seat events
+      parameters: [{ $ref: '#/components/parameters/ShowtimeID' }]
+      responses:
+        '101': { description: WebSocket protocol upgrade }
+  /api/v1/showtimes/{showtimeId}/holds:
+    post:
+      tags: [Holds]
+      summary: Atomically hold one or more seats for five minutes
+      security: [{ FirebaseBearer: [] }, { OAuthSession: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ShowtimeID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [seat_ids]
+              properties:
+                seat_ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  uniqueItems: true
+                  items: { type: string, pattern: '^[a-fA-F0-9]{24}$' }
+      responses:
+        '201':
+          description: Hold created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HoldEnvelope' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v1/holds/{holdId}:
+    get:
+      tags: [Holds]
+      summary: Read an owned hold
+      security: [{ FirebaseBearer: [] }, { OAuthSession: [] }]
+      parameters: [{ $ref: '#/components/parameters/HoldID' }]
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Holds]
+      summary: Idempotently release an owned hold
+      security: [{ FirebaseBearer: [] }, { OAuthSession: [] }]
+      parameters:
+        - $ref: '#/components/parameters/HoldID'
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/v1/holds/{holdId}/confirm:
+    post:
+      tags: [Bookings]
+      summary: Confirm an active hold with mock payment
+      security: [{ FirebaseBearer: [] }, { OAuthSession: [] }]
+      parameters:
+        - $ref: '#/components/parameters/HoldID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [payment_method]
+              properties:
+                payment_method: { type: string, const: MOCK }
+      responses:
+        '201':
+          description: Booking created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BookingEnvelope' }
+        '200':
+          description: Existing idempotent booking
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BookingEnvelope' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/bookings/me:
+    get:
+      tags: [Bookings]
+      summary: List the authenticated user's bookings
+      security: [{ FirebaseBearer: [] }, { OAuthSession: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+  /api/v1/bookings/{bookingId}:
+    get:
+      tags: [Bookings]
+      summary: Read an owned booking
+      security: [{ FirebaseBearer: [] }, { OAuthSession: [] }]
+      parameters: [{ $ref: '#/components/parameters/BookingID' }]
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/v1/admin/bookings:
+    get:
+      tags: [Admin]
+      summary: Filter and list all bookings
+      security: [{ FirebaseBearer: [] }, { OAuthSession: [] }]
+      parameters:
+        - { in: query, name: movie_id, schema: { type: string } }
+        - { in: query, name: date_from, schema: { type: string, format: date-time } }
+        - { in: query, name: date_to, schema: { type: string, format: date-time } }
+        - { in: query, name: user_email, schema: { type: string } }
+        - { in: query, name: booking_status, schema: { type: string } }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/v1/admin/bookings/{bookingId}:
+    get:
+      tags: [Admin]
+      summary: Read any booking as an administrator
+      security: [{ FirebaseBearer: [] }, { OAuthSession: [] }]
+      parameters: [{ $ref: '#/components/parameters/BookingID' }]
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/v1/admin/audit-logs:
+    get:
+      tags: [Admin]
+      summary: List required audit events
+      security: [{ FirebaseBearer: [] }, { OAuthSession: [] }]
+      parameters:
+        - { in: query, name: event_type, schema: { type: string } }
+        - { in: query, name: severity, schema: { type: string } }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '403': { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    FirebaseBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: Firebase ID token
+    OAuthSession:
+      type: apiKey
+      in: cookie
+      name: cinema_session
+  parameters:
+    MovieID: { in: path, name: movieId, required: true, schema: { type: string, pattern: '^[a-fA-F0-9]{24}$' } }
+    ShowtimeID: { in: path, name: showtimeId, required: true, schema: { type: string, pattern: '^[a-fA-F0-9]{24}$' } }
+    HoldID: { in: path, name: holdId, required: true, schema: { type: string, pattern: '^[a-fA-F0-9]{24}$' } }
+    BookingID: { in: path, name: bookingId, required: true, schema: { type: string, pattern: '^[a-fA-F0-9]{24}$' } }
+    IdempotencyKey: { in: header, name: Idempotency-Key, required: true, schema: { type: string, format: uuid } }
+    CSRFToken: { in: header, name: X-CSRF-Token, required: false, description: Required for mutations authenticated by OAuthSession., schema: { type: string } }
+    Page: { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+    Limit: { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+  responses:
+    Success:
+      description: Successful response
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/GenericEnvelope' }
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+  schemas:
+    Meta:
+      type: object
+      required: [request_id]
+      properties:
+        request_id: { type: string, format: uuid }
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+    GenericEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {}
+        meta: { $ref: '#/components/schemas/Meta' }
+    ErrorEnvelope:
+      type: object
+      required: [error, meta]
+      properties:
+        error:
+          type: object
+          required: [code, message, details]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+        meta: { $ref: '#/components/schemas/Meta' }
+    Movie:
+      type: object
+      required: [id, title, duration_minutes, status]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        duration_minutes: { type: integer }
+        poster_url: { type: string, format: uri }
+        status: { type: string }
+    Seat:
+      type: object
+      required: [id, showtime_id, seat_id, seat_label, row, number, price, status]
+      properties:
+        id: { type: string }
+        showtime_id: { type: string }
+        seat_id: { type: string }
+        seat_label: { type: string }
+        row: { type: string }
+        number: { type: integer }
+        price: { type: integer, description: Minor currency units }
+        status: { type: string, enum: [AVAILABLE, LOCKED, BOOKED] }
+        lock_expires_at: { type: string, format: date-time }
+    Hold:
+      type: object
+      required: [hold_id, showtime_id, seat_ids, status, expires_at, remaining_seconds]
+      properties:
+        hold_id: { type: string }
+        showtime_id: { type: string }
+        seat_ids: { type: array, items: { type: string } }
+        status: { type: string, enum: [ACTIVE, CONFIRMED, EXPIRED, RELEASED] }
+        expires_at: { type: string, format: date-time }
+        remaining_seconds: { type: integer }
+    Booking:
+      type: object
+      required: [id, booking_number, user_id, showtime_id, seats, total_amount, currency, booking_status]
+      properties:
+        id: { type: string }
+        booking_number: { type: string }
+        user_id: { type: string }
+        showtime_id: { type: string }
+        movie_title: { type: string }
+        showtime_start: { type: string, format: date-time }
+        auditorium_name: { type: string }
+        seats: { type: array, items: { type: object, properties: { seat_id: { type: string }, label: { type: string }, price: { type: integer } } } }
+        total_amount: { type: integer }
+        currency: { type: string }
+        booking_status: { type: string }
+    MovieListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/GenericEnvelope'
+        - type: object
+          properties: { data: { type: array, items: { $ref: '#/components/schemas/Movie' } } }
+    SeatListEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/GenericEnvelope'
+        - type: object
+          properties: { data: { type: array, items: { $ref: '#/components/schemas/Seat' } } }
+    HoldEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/GenericEnvelope'
+        - type: object
+          properties: { data: { $ref: '#/components/schemas/Hold' } }
+    BookingEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/GenericEnvelope'
+        - type: object
+          properties: { data: { $ref: '#/components/schemas/Booking' } }
+

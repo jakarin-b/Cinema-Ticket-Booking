@@ -1,0 +1,238 @@
+name: cinema-ticket-booking
+
+x-backend-environment: &backend-environment
+  APP_ENV: ${APP_ENV:-development}
+  HTTP_PORT: "8080"
+  WORKER_METRICS_PORT: "9091"
+  FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+  ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+  MONGODB_URI: mongodb://mongodb:27017/?replicaSet=rs0
+  MONGODB_DATABASE: ${MONGODB_DATABASE:-cinema}
+  REDIS_ADDR: redis:6379
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-cinema-local-redis}
+  REDIS_DB: ${REDIS_DB:-0}
+  SEAT_LOCK_TTL: ${SEAT_LOCK_TTL:-5m}
+  HOLD_SWEEP_INTERVAL: ${HOLD_SWEEP_INTERVAL:-5s}
+  RABBITMQ_URL: amqp://${RABBITMQ_USER:-cinema}:${RABBITMQ_PASSWORD:-cinema-local-rabbit}@rabbitmq:5672/
+  RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-cinema.events}
+  RABBITMQ_QUEUE: ${RABBITMQ_QUEUE:-booking.notifications}
+  FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+  FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL:-}
+  FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY:-}
+  GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+  GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+  GOOGLE_OAUTH_REDIRECT_URL: ${GOOGLE_OAUTH_REDIRECT_URL:-http://localhost:3000/api/v1/auth/google/callback}
+  ADMIN_EMAILS: ${ADMIN_EMAILS:-admin@example.com}
+  SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-cinema_session}
+  SESSION_TTL: ${SESSION_TTL:-12h}
+  OAUTH_STATE_TTL: ${OAUTH_STATE_TTL:-10m}
+  COOKIE_SECURE: ${COOKIE_SECURE:-false}
+  HOLD_RATE_LIMIT: ${HOLD_RATE_LIMIT:-10}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+  OTEL_EXPORTER_OTLP_INSECURE: "true"
+  OTEL_TRACES_ENABLED: ${OTEL_TRACES_ENABLED:-true}
+
+services:
+  mongodb:
+    image: mongo:7.0
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--quiet"]
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  mongo-init:
+    image: mongo:7.0
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    volumes:
+      - ./scripts/mongo-init.sh:/scripts/mongo-init.sh:ro
+    entrypoint: ["sh", "/scripts/mongo-init.sh"]
+    restart: "no"
+
+  redis:
+    image: redis:7.4-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-cinema-local-redis}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-cinema}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-cinema-local-rabbit}
+    ports:
+      - "15672:15672"
+    volumes:
+      - rabbit-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  seed:
+    build:
+      context: ./backend
+    image: cinema-ticket-booking-backend:local
+    entrypoint: ["/app/seed"]
+    environment: *backend-environment
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ./backend
+    image: cinema-ticket-booking-backend:local
+    environment: *backend-environment
+    ports:
+      - "8080:8080"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+    image: cinema-ticket-booking-backend:local
+    entrypoint: ["/app/worker"]
+    environment: *backend-environment
+    ports:
+      - "9091:9091"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9091/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  concurrency-test:
+    profiles: ["test"]
+    build:
+      context: ./backend
+    image: cinema-ticket-booking-backend:local
+    entrypoint: ["/app/concurrency-test"]
+    environment:
+      <<: *backend-environment
+      OTEL_TRACES_ENABLED: "false"
+      HOLD_RATE_LIMIT: "100"
+      SEAT_LOCK_TTL: "2s"
+      LOG_LEVEL: "error"
+      GIN_MODE: "release"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    restart: "no"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_FIREBASE_API_KEY: ${VITE_FIREBASE_API_KEY:-}
+        VITE_FIREBASE_AUTH_DOMAIN: ${VITE_FIREBASE_AUTH_DOMAIN:-}
+        VITE_FIREBASE_PROJECT_ID: ${VITE_FIREBASE_PROJECT_ID:-}
+        VITE_FIREBASE_APP_ID: ${VITE_FIREBASE_APP_ID:-}
+    ports:
+      - "3000:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  swagger:
+    image: swaggerapi/swagger-ui:v5.18.2
+    environment:
+      SWAGGER_JSON: /spec/openapi.yaml
+    volumes:
+      - ./backend/docs/openapi.yaml:/spec/openapi.yaml:ro
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.64.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
+  redis-data:
+  rabbit-data:
+  prometheus-data:
