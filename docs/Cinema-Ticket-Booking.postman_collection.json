@@ -1,43 +1,1228 @@
 {
   "info": {
-    "name": "Cinema Ticket Booking",
-    "description": "Required REST API. Set firebase_token after signing in through Firebase; direct OAuth uses browser cookies and CSRF.",
+    "_postman_id": "971ec8b9-ff16-4f21-a5c5-3f169935d907",
+    "name": "Cinema Ticket Booking API",
+    "description": "Import-ready HTTP collection for the Cinema Ticket Booking API.\n\nSetup\n1. Start the stack with `docker compose up --build`.\n2. Sign in through the frontend and copy the Firebase ID token into the collection variable `firebase_token`. The token is intentionally not committed.\n3. Run the folders in order. Catalogue requests select a movie, future showtime, and available seat automatically. Booking requests then save `hold_id` and `booking_id`.\n4. The Admin folder requires the signed-in email to be listed in `ADMIN_EMAILS`.\n\nDirect Google OAuth can also use Postman's cookie jar. Leave `firebase_token` empty, complete the browser redirect, and call `Current user` to capture the session-bound `csrf_token`.\n\nWebSocket requests use a separate Postman multi-protocol collection. Open `{{websocket_url}}/showtimes/{{showtime_id}}` manually to inspect seat snapshots and events.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{firebase_token}}",
+        "type": "string"
+      }
+    ]
+  },
   "variable": [
-    { "key": "base_url", "value": "http://localhost:8080/api/v1" },
-    { "key": "firebase_token", "value": "" },
-    { "key": "movie_id", "value": "650000000000000000000001" },
-    { "key": "showtime_id", "value": "650000000000000000000064" },
-    { "key": "seat_id", "value": "6500000000000000000003e9" },
-    { "key": "hold_id", "value": "" },
-    { "key": "booking_id", "value": "" }
+    {
+      "key": "base_url",
+      "value": "http://localhost:8080",
+      "type": "string"
+    },
+    {
+      "key": "api_url",
+      "value": "http://localhost:8080/api/v1",
+      "type": "string"
+    },
+    {
+      "key": "worker_url",
+      "value": "http://localhost:9091",
+      "type": "string"
+    },
+    {
+      "key": "websocket_url",
+      "value": "ws://localhost:8080/api/v1/ws",
+      "type": "string"
+    },
+    {
+      "key": "firebase_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "csrf_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "oauth_state",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "oauth_code",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "movie_id",
+      "value": "650000000000000000000001",
+      "type": "string"
+    },
+    {
+      "key": "showtime_id",
+      "value": "650000000000000000000064",
+      "type": "string"
+    },
+    {
+      "key": "seat_id",
+      "value": "6500000000000000000003e9",
+      "type": "string"
+    },
+    {
+      "key": "hold_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "booking_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "hold_idempotency_key",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "confirm_idempotency_key",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "release_seat_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "release_hold_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "release_idempotency_key",
+      "value": "",
+      "type": "string"
+    }
   ],
-  "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{firebase_token}}", "type": "string" }] },
   "item": [
-    { "name": "Authentication", "item": [
-      { "name": "Firebase session", "request": { "method": "POST", "url": "{{base_url}}/auth/session" } },
-      { "name": "Me", "request": { "method": "GET", "url": "{{base_url}}/auth/me" } },
-      { "name": "Direct Google OAuth", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/auth/google/start?return_to=/" } }
-    ] },
-    { "name": "Catalogue", "item": [
-      { "name": "Movies", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/movies" } },
-      { "name": "Movie", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/movies/{{movie_id}}" } },
-      { "name": "Showtimes", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/movies/{{movie_id}}/showtimes" } },
-      { "name": "Seat map", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/showtimes/{{showtime_id}}/seats" } }
-    ] },
-    { "name": "Booking flow", "item": [
-      { "name": "Create hold", "request": { "method": "POST", "header": [{ "key": "Idempotency-Key", "value": "{{$guid}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"seat_ids\": [\"{{seat_id}}\"]\n}" }, "url": "{{base_url}}/showtimes/{{showtime_id}}/holds" } },
-      { "name": "Get hold", "request": { "method": "GET", "url": "{{base_url}}/holds/{{hold_id}}" } },
-      { "name": "Confirm hold", "request": { "method": "POST", "header": [{ "key": "Idempotency-Key", "value": "{{$guid}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"payment_method\": \"MOCK\"\n}" }, "url": "{{base_url}}/holds/{{hold_id}}/confirm" } },
-      { "name": "Release hold", "request": { "method": "DELETE", "url": "{{base_url}}/holds/{{hold_id}}" } },
-      { "name": "My bookings", "request": { "method": "GET", "url": "{{base_url}}/bookings/me" } },
-      { "name": "Booking detail", "request": { "method": "GET", "url": "{{base_url}}/bookings/{{booking_id}}" } }
-    ] },
-    { "name": "Admin", "item": [
-      { "name": "Bookings filtered by status", "request": { "method": "GET", "url": "{{base_url}}/admin/bookings?booking_status=CONFIRMED" } },
-      { "name": "Audit logs", "request": { "method": "GET", "url": "{{base_url}}/admin/audit-logs" } }
-    ] }
+    {
+      "name": "01 - Health & Observability",
+      "description": "Public health and metrics endpoints for the API and background worker.",
+      "item": [
+        {
+          "name": "API liveness",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('API reports live', () => pm.expect(body.data.status).to.eql('live'));",
+                  "pm.test('Response has a request ID', () => pm.expect(body.meta.request_id).to.be.a('string').and.not.empty);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{base_url}}/health/live",
+            "description": "Checks whether the API process is running."
+          }
+        },
+        {
+          "name": "API readiness",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is ready or reports an unconfigured dependency', () => pm.expect([200, 503]).to.include(pm.response.code));",
+                  "const body = pm.response.json();",
+                  "pm.test('Response includes dependency information', () => pm.expect(body.data?.checks || body.error?.details).to.be.an('object'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{base_url}}/health/ready",
+            "description": "Returns 200 when MongoDB, Redis, RabbitMQ, Firebase, and Google OAuth are ready. A local stack without both auth providers intentionally returns 503 with dependency details."
+          }
+        },
+        {
+          "name": "API metrics",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Prometheus metrics are returned', () => pm.expect(pm.response.text()).to.include('# HELP'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/metrics",
+            "description": "Prometheus metrics exposed by the API process."
+          }
+        },
+        {
+          "name": "Worker liveness",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Worker reports live', () => pm.expect(pm.response.json().status).to.eql('live'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{worker_url}}/health/live",
+            "description": "Checks whether the outbox and notification worker is running."
+          }
+        },
+        {
+          "name": "Worker metrics",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Prometheus metrics are returned', () => pm.expect(pm.response.text()).to.include('# HELP'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{worker_url}}/metrics",
+            "description": "Prometheus metrics exposed by the worker process."
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 - Authentication",
+      "description": "Use a Firebase ID token for normal API testing. Direct Google OAuth is included as a browser-oriented alternative.",
+      "item": [
+        {
+          "name": "Create Firebase session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Firebase identity is resolved', () => pm.expect(body.data.auth_method).to.eql('firebase'));",
+                  "if (body.data?.user) {",
+                  "  pm.collectionVariables.set('current_user_email', body.data.user.email);",
+                  "  pm.collectionVariables.set('current_user_role', body.data.user.role);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/auth/session",
+            "description": "Verifies `firebase_token`, upserts the local user, links the provider identity, and resolves the server-side role. The endpoint does not return a new token; protected requests reuse the Firebase token."
+          }
+        },
+        {
+          "name": "Current user",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Authenticated user is returned', () => pm.expect(body.data.user.email).to.be.a('string').and.not.empty);",
+                  "if (body.data.csrf_token) {",
+                  "  pm.collectionVariables.set('csrf_token', body.data.csrf_token);",
+                  "}",
+                  "pm.collectionVariables.set('current_user_email', body.data.user.email);",
+                  "pm.collectionVariables.set('current_user_role', body.data.user.role);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/auth/me",
+            "description": "Returns the current principal. When authenticated by the `cinema_session` cookie, the test script saves the returned CSRF token for mutating requests."
+          }
+        },
+        {
+          "name": "Start direct Google OAuth",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('OAuth starts or reports missing provider configuration', () => pm.expect([302, 503]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{api_url}}/auth/google/start?return_to=/",
+            "description": "Starts the direct Google authorization-code flow. Redirect following is disabled so the response can be inspected. Complete the interactive provider login in a browser; Postman's HTTP runner cannot complete it automatically."
+          },
+          "protocolProfileBehavior": {
+            "followRedirects": false
+          }
+        },
+        {
+          "name": "Google OAuth callback (provider-controlled)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Callback redirects to the frontend', () => pm.response.to.have.status(302));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{api_url}}/auth/google/callback?state={{oauth_state}}&code={{oauth_code}}",
+            "description": "Provider-controlled callback included for route completeness. Google normally supplies `state` and `code`; calling it manually with empty or stale values redirects to the frontend error page and clears the one-time OAuth state cookie."
+          },
+          "protocolProfileBehavior": {
+            "followRedirects": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 - Catalogue",
+      "description": "Public read-only catalogue. Run this folder before either hold flow so IDs are selected from current seed data.",
+      "item": [
+        {
+          "name": "List movies",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('At least one active movie is returned', () => pm.expect(body.data).to.be.an('array').that.is.not.empty);",
+                  "if (body.data?.length) {",
+                  "  pm.collectionVariables.set('movie_id', body.data[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/movies",
+            "description": "Lists active movies and saves the first movie ID as `movie_id`."
+          }
+        },
+        {
+          "name": "Get movie",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Requested movie is returned', () => pm.expect(body.data.id).to.eql(pm.collectionVariables.get('movie_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/movies/{{movie_id}}",
+            "description": "Returns one active movie."
+          }
+        },
+        {
+          "name": "List movie showtimes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('At least one future showtime is returned', () => pm.expect(body.data).to.be.an('array').that.is.not.empty);",
+                  "if (body.data?.length) {",
+                  "  pm.collectionVariables.set('showtime_id', body.data[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/movies/{{movie_id}}/showtimes",
+            "description": "Lists future active showtimes and saves the first ID as `showtime_id`."
+          }
+        },
+        {
+          "name": "Get showtime detail",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Showtime, movie, and auditorium are returned', () => {",
+                  "  pm.expect(body.data.showtime.id).to.eql(pm.collectionVariables.get('showtime_id'));",
+                  "  pm.expect(body.data.movie).to.be.an('object');",
+                  "  pm.expect(body.data.auditorium).to.be.an('object');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/showtimes/{{showtime_id}}",
+            "description": "Returns the showtime with its movie and auditorium."
+          }
+        },
+        {
+          "name": "Get seat map",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "const available = body.data?.find((seat) => seat.status === 'AVAILABLE');",
+                  "pm.test('At least one seat is available', () => pm.expect(available, 'available seat').to.exist);",
+                  "if (available) {",
+                  "  pm.collectionVariables.set('seat_id', available.seat_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/showtimes/{{showtime_id}}/seats",
+            "description": "Returns the authoritative seat map and saves the first AVAILABLE auditorium seat ID as `seat_id`."
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 - Booking Confirmation Flow",
+      "description": "End-to-end authenticated flow. It creates a hold, proves both idempotent operations, confirms the mock payment, and verifies the resulting booked seat.",
+      "item": [
+        {
+          "name": "Create hold",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('hold_idempotency_key', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('Active hold is returned', () => pm.expect(body.data.status).to.eql('ACTIVE'));",
+                  "pm.test('Hold contains the requested seat', () => pm.expect(body.data.seat_ids).to.include(pm.collectionVariables.get('seat_id')));",
+                  "if (body.data?.hold_id) {",
+                  "  pm.collectionVariables.set('hold_id', body.data.hold_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{hold_idempotency_key}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrf_token}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"seat_ids\": [\n    \"{{seat_id}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{api_url}}/showtimes/{{showtime_id}}/holds",
+            "description": "Atomically holds one to ten seats for five minutes. The pre-request script creates one idempotency key and the test saves `hold_id`."
+          }
+        },
+        {
+          "name": "Retry create hold with same idempotency key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Existing hold returns 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('The same hold is returned', () => pm.expect(body.data.hold_id).to.eql(pm.collectionVariables.get('hold_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{hold_idempotency_key}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrf_token}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"seat_ids\": [\n    \"{{seat_id}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{api_url}}/showtimes/{{showtime_id}}/holds",
+            "description": "Repeats the exact hold request with the same key and expects the original hold instead of a duplicate."
+          }
+        },
+        {
+          "name": "Get hold",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Owned hold is active', () => {",
+                  "  pm.expect(body.data.hold_id).to.eql(pm.collectionVariables.get('hold_id'));",
+                  "  pm.expect(body.data.status).to.eql('ACTIVE');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/holds/{{hold_id}}",
+            "description": "Returns a hold owned by the current user, including server-side remaining seconds."
+          }
+        },
+        {
+          "name": "Confirm hold",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('confirm_idempotency_key', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('Confirmed booking is returned', () => {",
+                  "  pm.expect(body.data.booking_status).to.eql('CONFIRMED');",
+                  "  pm.expect(body.data.payment_status).to.eql('PAID');",
+                  "});",
+                  "if (body.data?.id) {",
+                  "  pm.collectionVariables.set('booking_id', body.data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{confirm_idempotency_key}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrf_token}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"payment_method\": \"MOCK\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{api_url}}/holds/{{hold_id}}/confirm",
+            "description": "Confirms an unexpired hold using the only supported payment method, `MOCK`, and saves `booking_id`."
+          }
+        },
+        {
+          "name": "Retry confirm with same idempotency key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Existing booking returns 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('The same booking is returned', () => pm.expect(body.data.id).to.eql(pm.collectionVariables.get('booking_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{confirm_idempotency_key}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrf_token}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"payment_method\": \"MOCK\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{api_url}}/holds/{{hold_id}}/confirm",
+            "description": "Repeats confirmation with the same key and expects the original booking."
+          }
+        },
+        {
+          "name": "List my bookings",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Bookings are paginated', () => {",
+                  "  pm.expect(body.data).to.be.an('array');",
+                  "  pm.expect(body.meta.page).to.eql(1);",
+                  "  pm.expect(body.meta.limit).to.eql(20);",
+                  "});",
+                  "pm.test('New booking is listed', () => pm.expect(body.data.some((booking) => booking.id === pm.collectionVariables.get('booking_id'))).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/bookings/me?page=1&limit=20",
+            "description": "Lists bookings owned by the current user."
+          }
+        },
+        {
+          "name": "Get booking detail",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Requested booking is returned', () => pm.expect(body.data.id).to.eql(pm.collectionVariables.get('booking_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/bookings/{{booking_id}}",
+            "description": "Returns a booking owned by the current user. Administrators can also read it."
+          }
+        },
+        {
+          "name": "Verify booked seat",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "const seat = body.data?.find((item) => item.seat_id === pm.collectionVariables.get('seat_id'));",
+                  "pm.test('Confirmed seat is BOOKED', () => pm.expect(seat?.status).to.eql('BOOKED'));",
+                  "pm.test('Seat references the booking', () => pm.expect(seat?.booking_id).to.eql(pm.collectionVariables.get('booking_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/showtimes/{{showtime_id}}/seats",
+            "description": "Reloads the public seat map and verifies the confirmed seat is authoritative BOOKED state."
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 - Manual Release Flow",
+      "description": "A separate end-to-end path that selects another available seat, creates a different hold, and releases it without affecting the confirmed-booking flow.",
+      "item": [
+        {
+          "name": "Select another available seat",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "const available = body.data?.find((seat) => seat.status === 'AVAILABLE' && seat.seat_id !== pm.collectionVariables.get('seat_id'));",
+                  "pm.test('Another seat is available', () => pm.expect(available, 'release-flow seat').to.exist);",
+                  "if (available) {",
+                  "  pm.collectionVariables.set('release_seat_id', available.seat_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/showtimes/{{showtime_id}}/seats",
+            "description": "Finds another available seat and saves it as `release_seat_id`."
+          }
+        },
+        {
+          "name": "Create hold to release",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('release_idempotency_key', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('Active hold is returned', () => pm.expect(body.data.status).to.eql('ACTIVE'));",
+                  "if (body.data?.hold_id) {",
+                  "  pm.collectionVariables.set('release_hold_id', body.data.hold_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{release_idempotency_key}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrf_token}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"seat_ids\": [\n    \"{{release_seat_id}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{api_url}}/showtimes/{{showtime_id}}/holds",
+            "description": "Creates an independent active hold and saves it as `release_hold_id`."
+          }
+        },
+        {
+          "name": "Release hold",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Hold is released', () => {",
+                  "  pm.expect(body.data.hold_id).to.eql(pm.collectionVariables.get('release_hold_id'));",
+                  "  pm.expect(body.data.status).to.eql('RELEASED');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrf_token}}",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/holds/{{release_hold_id}}",
+            "description": "Idempotently releases an active hold owned by the current user."
+          }
+        },
+        {
+          "name": "Get released hold",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Released status is persisted', () => pm.expect(body.data.status).to.eql('RELEASED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/holds/{{release_hold_id}}",
+            "description": "Reads the released hold to verify its terminal status."
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 - Admin",
+      "description": "Requires the Firebase or OAuth identity email to be present in `ADMIN_EMAILS`. Non-admin users correctly receive 403.",
+      "item": [
+        {
+          "name": "List bookings with filters",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Filtered bookings are returned', () => {",
+                  "  pm.expect(body.data).to.be.an('array');",
+                  "  pm.expect(body.data.every((booking) => booking.booking_status === 'CONFIRMED')).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/admin/bookings?booking_status=CONFIRMED&page=1&limit=20",
+            "description": "Lists all confirmed bookings. Supported filters are `movie_id`, `date_from`, `date_to`, `user_email`, and `booking_status`. Dates must be RFC3339."
+          }
+        },
+        {
+          "name": "Get any booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Requested booking is returned', () => pm.expect(body.data.id).to.eql(pm.collectionVariables.get('booking_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/admin/bookings/{{booking_id}}",
+            "description": "Returns any booking to an administrator."
+          }
+        },
+        {
+          "name": "List audit logs",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Audit logs are paginated', () => {",
+                  "  pm.expect(body.data).to.be.an('array');",
+                  "  pm.expect(body.meta.page).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/admin/audit-logs?event_type=BOOKING_SUCCESS&severity=INFO&page=1&limit=50",
+            "description": "Lists recent booking-success audit events. `event_type` and `severity` are optional filters."
+          }
+        }
+      ]
+    },
+    {
+      "name": "07 - Session Cleanup",
+      "description": "Run this last when testing a direct Google OAuth cookie session.",
+      "item": [
+        {
+          "name": "Logout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Logout is acknowledged', () => pm.expect(pm.response.json().data.logged_out).to.be.true);",
+                  "pm.collectionVariables.unset('csrf_token');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{csrf_token}}",
+                "type": "text"
+              }
+            ],
+            "url": "{{api_url}}/auth/logout",
+            "description": "Deletes the server-side OAuth session and clears its cookie. With Firebase authentication, token revocation remains the Firebase client's responsibility."
+          }
+        }
+      ]
+    }
   ]
 }
-

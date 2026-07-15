@@ -85,6 +85,19 @@ Local URLs:
 
 The application can start without cloud credentials so its public catalogue and infrastructure can be inspected, but `/health/ready` remains `503` and login endpoints return `AUTH_PROVIDER_UNAVAILABLE` until both providers are configured. There is intentionally no development authentication bypass.
 
+### Postman collection
+
+Import [`docs/Cinema-Ticket-Booking.postman_collection.json`](docs/Cinema-Ticket-Booking.postman_collection.json). All local URLs and flow IDs are collection variables, so a separate Postman environment is not required.
+
+1. Sign in through the frontend and copy the Firebase ID token into the collection variable `firebase_token`.
+2. Run `03 - Catalogue` to select a current movie, future showtime, and available seat automatically.
+3. Run `04 - Booking Confirmation Flow` or `05 - Manual Release Flow`. Test scripts preserve the generated idempotency keys and capture `hold_id` and `booking_id` for later requests.
+4. Run `06 - Admin` only with an identity whose email is listed in `ADMIN_EMAILS`.
+
+For direct Google OAuth, leave `firebase_token` empty, complete the browser authorization flow, make the resulting `cinema_session` cookie available to Postman's `localhost` cookie jar, and run `Current user` to capture the session-bound `csrf_token`.
+
+Postman stores WebSocket requests in a different multi-protocol collection format, so the exported HTTP collection documents but does not embed the realtime endpoint. Create a separate WebSocket request for `ws://localhost:8080/api/v1/ws/showtimes/{{showtime_id}}` when inspecting seat events. See [Postman's WebSocket collection documentation](https://learning.postman.com/docs/use/send-requests/protocols/websocket/save-websocket-requests/).
+
 ## Authentication setup
 
 ### Firebase Google Sign-In
@@ -119,16 +132,26 @@ Each provider identity is unique by `(provider, subject)`. A new identity may at
 
 ## Booking flow
 
-1. The user authenticates through Firebase or direct Google OAuth.
-2. The frontend loads the current MongoDB seat snapshot and opens a showtime WebSocket.
-3. The user chooses one or more `AVAILABLE` seats.
-4. The API validates the showtime and all seat IDs, then atomically acquires every Redis key.
-5. A MongoDB transaction conditionally changes exactly that many seats to `LOCKED` and inserts the hold.
-6. A Redis Pub/Sub event reaches API WebSocket rooms; other clients disable the seats.
-7. Checkout counts down from the server-provided `expires_at` and accepts only mock payment.
-8. Confirmation verifies Redis ownership and transactionally changes the seats to `BOOKED`, inserts one booking and audit record, confirms the hold, and writes an outbox event.
-9. The outbox worker publishes `booking.confirmed` to RabbitMQ using persistent messages and publisher confirms.
-10. The notification consumer records and logs an idempotent mock notification, then acknowledges the delivery.
+1. **Authenticate the user.** The user signs in through Firebase or direct Google OAuth. Firebase requests send the verified ID token as a Bearer token. Direct OAuth requests use the opaque `cinema_session` cookie, and mutating requests must also send the session-bound `X-CSRF-Token`. The API resolves the provider identity to a server-owned user ID and role; the client cannot submit either value.
+2. **Load the public catalogue.** The frontend requests `GET /api/v1/movies`, selects a movie, and loads its future sessions from `GET /api/v1/movies/:movieId/showtimes`. Only active movies and active showtimes whose start time is still in the future are returned.
+3. **Load the authoritative seat map.** `GET /api/v1/showtimes/:showtimeId/seats` reads the materialized seat state from MongoDB. Each item contains the auditorium seat ID, label, server-owned price, and current `AVAILABLE`, `LOCKED`, or `BOOKED` status.
+4. **Subscribe to live changes.** The frontend connects to `GET /api/v1/ws/showtimes/:showtimeId`. The server immediately sends a MongoDB snapshot and then forwards `seat.locked`, `seat.released`, and `seat.booked` hints received through Redis Pub/Sub. If the connection is interrupted, the client refetches the REST seat map because MongoDB remains authoritative.
+5. **Select seats locally.** The user selects between one and ten seats currently shown as `AVAILABLE`. The UI treats this as a proposal only: it does not assume the seats are still free and cannot provide a trusted price, lock owner, or expiration time.
+6. **Submit the hold request.** The frontend calls `POST /api/v1/showtimes/:showtimeId/holds` with the selected `seat_ids`, a new UUID in `Idempotency-Key`, and the authentication headers. The hold rate limiter is applied per authenticated user and client IP before the booking service runs.
+7. **Validate idempotency and input.** A missing `Idempotency-Key` returns `400`. If the same user already used that key, the API returns the existing hold with `200 OK`. Otherwise it parses, deduplicates, and sorts the seat IDs, rejects malformed or out-of-range seat selections with `422`, and verifies that the requested showtime is active, has not started, and owns every requested seat.
+8. **Acquire all Redis locks atomically.** One ownership value containing the new hold ID, user ID, and random lock token is prepared for every requested showtime-seat key. A Lua script first checks every key and writes all keys with the five-minute TTL only when all are free. If any seat is already owned, no key is written and the API returns `409 SEAT_UNAVAILABLE`.
+9. **Persist the active hold.** After Redis acquisition, a MongoDB transaction conditionally changes exactly the requested seats from `AVAILABLE` or expired `LOCKED` to `LOCKED`, attaches the hold and user ownership, stores `lock_expires_at`, and inserts one `ACTIVE` hold. An exact modified-count check prevents partial multi-seat holds.
+10. **Compensate if durable persistence fails.** If the MongoDB transaction aborts or updates fewer seats than requested, the API deletes only Redis keys whose values still match this hold's ownership token. It records a `SYSTEM_ERROR` when appropriate and returns an error without exposing a partially created hold.
+11. **Return and broadcast the hold.** A new hold returns `201 Created` with `hold_id`, `showtime_id`, `seat_ids`, `status`, server-generated `expires_at`, and `remaining_seconds`. The API publishes `seat.locked` through Redis Pub/Sub so every API instance can update its WebSocket clients and disable those seats.
+12. **Display checkout using server time.** The frontend navigates to checkout and counts down from `expires_at`; the browser clock is presentational only. `GET /api/v1/holds/:holdId` can refresh the owned hold and remaining time. The only supported payment method is the deterministic mock method `MOCK`.
+13. **Submit confirmation.** Before the hold expires, the frontend calls `POST /api/v1/holds/:holdId/confirm` with `{ "payment_method": "MOCK" }` and a separate confirmation `Idempotency-Key`. Reusing that key returns the existing booking with `200 OK`; the first successful confirmation returns `201 Created`.
+14. **Revalidate ownership and expiration.** The API loads the hold, verifies that the current user owns it, checks that it is still `ACTIVE` and unexpired, and uses Redis Lua verification to ensure every seat key still contains the expected ownership value. A released, expired, or ownership-mismatched hold returns `409 HOLD_EXPIRED` and cannot reach the booking transaction.
+15. **Build trusted booking data.** The server reloads the showtime seats, movie, and auditorium from MongoDB, sorts the seat labels, and calculates the total from stored seat prices. User identity, movie title, showtime, auditorium, prices, total, and currency are never accepted from the confirmation body.
+16. **Commit the booking atomically.** One MongoDB transaction conditionally changes the hold from `ACTIVE` to `CONFIRMED`, changes exactly its still-owned and unexpired seats from `LOCKED` to `BOOKED`, inserts the immutable booking, writes a `BOOKING_SUCCESS` audit log, and inserts a `PENDING` `booking.confirmed` outbox event. If any required state changed concurrently, the whole transaction aborts and no booking is created.
+17. **Clean up locks and update clients.** After the transaction commits, the API ownership-safely removes the Redis seat keys and publishes `seat.booked` with the booking ID. The HTTP response returns the booking number, selected seats, total amount in minor THB units, payment status, and booking status. Clients can then use `GET /api/v1/bookings/me` or `GET /api/v1/bookings/:bookingId` to read the durable result.
+18. **Deliver the asynchronous notification.** The worker leases the pending outbox row, publishes a persistent `booking.confirmed` message with mandatory routing and publisher confirms, and marks the row `PUBLISHED` only after RabbitMQ confirms it. The consumer reloads the booking, inserts a notification unique by `event_id`, logs the mock notification, and acknowledges the message. Failures use the configured retry queues and eventually reach the DLQ instead of changing the already committed booking result.
+
+If the user abandons checkout, `DELETE /api/v1/holds/:holdId` transactionally changes an owned `ACTIVE` hold to `RELEASED`, returns only its matching seats to `AVAILABLE`, records the audit event, safely removes the Redis ownership keys, and publishes `seat.released`. If no manual release occurs, the worker finds the expired hold, performs the equivalent guarded transition to `EXPIRED`, and broadcasts the released seats. Neither path can release a confirmed booking or a seat now owned by another hold.
 
 ## Redis lock strategy
 

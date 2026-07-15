@@ -45,6 +45,8 @@ services:
       timeout: 5s
       retries: 30
     restart: unless-stopped
+    ports:
+    - "127.0.0.1:27017:27017"
 
   mongo-init:
     image: mongo:7.0
@@ -69,6 +71,8 @@ services:
       timeout: 5s
       retries: 30
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
