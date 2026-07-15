@@ -17,7 +17,10 @@ Google OAuth clients may support overlapping secrets depending on console capabi
 
 Rotate local passwords by stopping services, changing `.env`, and recreating their volumes. In production, introduce a second user/password where supported, roll applications, then remove the old credential. Existing direct OAuth sessions are intentionally invalidated by Redis credential/storage replacement.
 
+## SMTP credentials
+
+Mailpit requires no local credentials. For a deployed SMTP provider, create a replacement SMTP user or app password, update `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_HOST`, `SMTP_PORT`, and `SMTP_FROM` in the secret/configuration store, recreate the worker, and confirm a booking email is accepted before revoking the previous credential. Use a STARTTLS endpoint; implicit TLS on port 465 is not supported by this client.
+
 ## Incident response
 
-If any session or provider credential leaks, rotate the credential, clear Redis sessions and OAuth state, inspect `SYSTEM_ERROR` and request logs, and revoke affected provider sessions outside this application.
-
+If any session, provider, or SMTP credential leaks, rotate the credential, clear Redis sessions and OAuth state when applicable, inspect `SYSTEM_ERROR`, worker, and request logs, and revoke affected provider sessions outside this application.

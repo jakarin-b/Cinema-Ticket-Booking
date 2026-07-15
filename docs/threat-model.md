@@ -11,6 +11,6 @@
 | Cross-account linking | Provider subject first; only normalized verified-email fallback | Provider account/email compromise |
 | Booking retry duplication | Unique hold and idempotency indexes | Client must retain its idempotency key |
 | Message loss/duplicate | Transactional outbox, confirms, manual ack, idempotent consumer | Single local broker is not highly available |
+| Email misdelivery or SMTP credential theft | Recipient comes from the verified booking identity; sender addresses are validated; credentials stay in deployment secrets | SMTP provider compromise and a narrow post-send crash window remain external risks |
 | Secret leakage | Environment variables, redacted logs, no tokens in audit metadata | Local `.env` file protection is the operator's responsibility |
 | Resource exhaustion | Body limit, hold rate limit, bounded WebSocket queue, pagination limits | No global WAF or distributed DDoS protection |
-

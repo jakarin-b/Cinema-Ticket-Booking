@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -125,8 +127,11 @@ func main() {
 	_ = deps.Store.DB.Collection("showtime_seats").FindOne(ctx, bson.M{"showtime_id": fixture.showtime, "seat_id": fixture.seat}).Decode(&seat)
 	invariantOK = invariantOK && bookings == 1 && seat.Status == domain.SeatBooked
 	bookingID, _ := primitive.ObjectIDFromHex(fmt.Sprint(firstEnvelope.Data["id"]))
-	notificationDelivered := waitForNotification(ctx, deps, bookingID, 15*time.Second)
+	expectedRecipient := "concurrency-" + token + "@example.test"
+	notification, notificationDelivered := waitForNotification(ctx, deps, bookingID, expectedRecipient, 15*time.Second)
 	invariantOK = invariantOK && notificationDelivered
+	duplicateNotificationSuppressed := notificationDelivered && verifyDuplicateNotification(ctx, deps, bookingID, notification)
+	invariantOK = invariantOK && duplicateNotificationSuppressed
 	bookedRetryStatus, _, _ := request(server.URL+"/api/v1/showtimes/"+fixture.showtime.Hex()+"/holds", "booked-retry", uuid.NewString(), map[string]any{"seat_ids": []string{fixture.seat.Hex()}})
 	bookedSeatProtected := bookedRetryStatus == http.StatusConflict
 	invariantOK = invariantOK && bookedSeatProtected
@@ -144,7 +149,8 @@ func main() {
 	fmt.Printf("Conflicts: %d\n", conflicts.Load())
 	fmt.Printf("Unexpected errors: %d\n", unexpected.Load())
 	fmt.Printf("Double booking detected: %t\n", bookings != 1)
-	fmt.Printf("Booking event consumed: %t\n", notificationDelivered)
+	fmt.Printf("Booking email delivered: %t\n", notificationDelivered)
+	fmt.Printf("Duplicate booking email suppressed: %t\n", duplicateNotificationSuppressed)
 	fmt.Printf("Booked seat protected: %t\n", bookedSeatProtected)
 	fmt.Printf("Manual release verified: %t\n", manualReleased)
 	fmt.Printf("Expiration verified: %t\n", expiredSafely)
@@ -336,20 +342,93 @@ func verifyExpiration(ctx context.Context, deps *bootstrap.Dependencies, serverU
 	return false
 }
 
-func waitForNotification(ctx context.Context, deps *bootstrap.Dependencies, bookingID primitive.ObjectID, timeout time.Duration) bool {
+func waitForNotification(ctx context.Context, deps *bootstrap.Dependencies, bookingID primitive.ObjectID, expectedRecipient string, timeout time.Duration) (domain.Notification, bool) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		count, err := deps.Store.DB.Collection("notifications").CountDocuments(ctx, bson.M{"booking_id": bookingID})
-		if err == nil && count == 1 {
-			return true
+		var booking domain.Booking
+		var notification domain.Notification
+		bookingErr := deps.Store.DB.Collection("bookings").FindOne(ctx, bson.M{"_id": bookingID}).Decode(&booking)
+		notificationErr := deps.Store.DB.Collection("notifications").FindOne(ctx, bson.M{"booking_id": bookingID}).Decode(&notification)
+		if bookingErr == nil && notificationErr == nil {
+			count, _ := deps.Store.DB.Collection("notifications").CountDocuments(ctx, bson.M{"booking_id": bookingID})
+			expectedSubject := "Booking " + booking.BookingNumber + " confirmed"
+			valid := count == 1 && notification.Recipient == expectedRecipient && notification.Subject == expectedSubject && !notification.SentAt.IsZero() && strings.Contains(notification.Message, "Seats: "+seatLabels(booking.Seats))
+			return notification, valid
 		}
 		select {
 		case <-ctx.Done():
-			return false
+			return domain.Notification{}, false
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	return false
+	return domain.Notification{}, false
+}
+
+func verifyDuplicateNotification(ctx context.Context, deps *bootstrap.Dependencies, bookingID primitive.ObjectID, notification domain.Notification) bool {
+	messageID := notification.EventID + "@cinema-ticket-booking.local"
+	before, err := mailpitMessageCount(ctx, messageID)
+	if err != nil || before != 1 {
+		return false
+	}
+	payload, _ := json.Marshal(map[string]string{"event_id": notification.EventID, "booking_id": bookingID.Hex()})
+	if err := deps.Rabbit.Publish(ctx, "booking.confirmed", payload, nil); err != nil {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(time.Second):
+	}
+	notificationCount, err := deps.Store.DB.Collection("notifications").CountDocuments(ctx, bson.M{"event_id": notification.EventID})
+	if err != nil || notificationCount != 1 {
+		return false
+	}
+	after, err := mailpitMessageCount(ctx, messageID)
+	return err == nil && after == before
+}
+
+func mailpitMessageCount(ctx context.Context, messageID string) (int, error) {
+	baseURL := strings.TrimRight(os.Getenv("MAILPIT_API_URL"), "/")
+	if baseURL == "" {
+		baseURL = "http://localhost:8025"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/messages", nil)
+	if err != nil {
+		return 0, err
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("Mailpit messages returned %s", resp.Status)
+	}
+	var result struct {
+		Messages []struct {
+			MessageID string `json:"MessageID"`
+		} `json:"messages"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, message := range result.Messages {
+		if message.MessageID == messageID {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func seatLabels(seats []domain.BookingSeat) string {
+	labels := make([]string, len(seats))
+	for i, seat := range seats {
+		labels[i] = seat.Label
+	}
+	sort.Strings(labels)
+	return strings.Join(labels, ", ")
 }
 
 func request(baseURL, token, key string, body any) (int, []byte, error) {

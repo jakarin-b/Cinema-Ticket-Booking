@@ -16,6 +16,11 @@ x-backend-environment: &backend-environment
   RABBITMQ_URL: amqp://${RABBITMQ_USER:-cinema}:${RABBITMQ_PASSWORD:-cinema-local-rabbit}@rabbitmq:5672/
   RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-cinema.events}
   RABBITMQ_QUEUE: ${RABBITMQ_QUEUE:-booking.notifications}
+  SMTP_HOST: ${SMTP_HOST:-mailpit}
+  SMTP_PORT: ${SMTP_PORT:-1025}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: "${SMTP_FROM:-Cinema Ticket Booking <no-reply@cinema.local>}"
   FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
   FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL:-}
   FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY:-}
@@ -90,6 +95,13 @@ services:
       retries: 30
     restart: unless-stopped
 
+  mailpit:
+    image: axllent/mailpit:v1.30.4
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "8025:8025"
+    restart: unless-stopped
+
   seed:
     build:
       context: ./backend
@@ -141,6 +153,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      mailpit:
+        condition: service_started
       otel-collector:
         condition: service_started
     healthcheck:
@@ -159,6 +173,7 @@ services:
     environment:
       <<: *backend-environment
       OTEL_TRACES_ENABLED: "false"
+      MAILPIT_API_URL: http://mailpit:8025
       HOLD_RATE_LIMIT: "100"
       SEAT_LOCK_TTL: "2s"
       LOG_LEVEL: "error"

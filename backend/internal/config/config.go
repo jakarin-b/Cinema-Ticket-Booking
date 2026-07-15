@@ -2,6 +2,8 @@ package config
 
 import (
 	"errors"
+	"fmt"
+	"net/mail"
 	"os"
 	"strconv"
 	"strings"
@@ -24,6 +26,11 @@ type Config struct {
 	RabbitURL           string
 	RabbitExchange      string
 	RabbitQueue         string
+	SMTPHost            string
+	SMTPPort            int
+	SMTPUsername        string
+	SMTPPassword        string
+	SMTPFrom            string
 	FirebaseProjectID   string
 	FirebaseClientEmail string
 	FirebasePrivateKey  string
@@ -67,6 +74,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	smtpPort, err := integer("SMTP_PORT", 1025)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		AppEnv:              env("APP_ENV", "development"),
@@ -84,6 +95,11 @@ func Load() (Config, error) {
 		RabbitURL:           env("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
 		RabbitExchange:      env("RABBITMQ_EXCHANGE", "cinema.events"),
 		RabbitQueue:         env("RABBITMQ_QUEUE", "booking.notifications"),
+		SMTPHost:            strings.TrimSpace(env("SMTP_HOST", "localhost")),
+		SMTPPort:            smtpPort,
+		SMTPUsername:        strings.TrimSpace(os.Getenv("SMTP_USERNAME")),
+		SMTPPassword:        os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:            strings.TrimSpace(env("SMTP_FROM", "Cinema Ticket Booking <no-reply@cinema.local>")),
 		FirebaseProjectID:   os.Getenv("FIREBASE_PROJECT_ID"),
 		FirebaseClientEmail: os.Getenv("FIREBASE_CLIENT_EMAIL"),
 		FirebasePrivateKey:  strings.ReplaceAll(os.Getenv("FIREBASE_PRIVATE_KEY"), `\n`, "\n"),
@@ -103,6 +119,18 @@ func Load() (Config, error) {
 	}
 	if cfg.SeatLockTTL <= 0 || cfg.HoldSweepInterval <= 0 || cfg.SessionTTL <= 0 || cfg.OAuthStateTTL <= 0 {
 		return Config{}, errors.New("duration settings must be positive")
+	}
+	if cfg.SMTPHost == "" {
+		return Config{}, errors.New("SMTP_HOST is required")
+	}
+	if cfg.SMTPPort < 1 || cfg.SMTPPort > 65535 {
+		return Config{}, errors.New("SMTP_PORT must be between 1 and 65535")
+	}
+	if _, err := mail.ParseAddress(cfg.SMTPFrom); err != nil {
+		return Config{}, fmt.Errorf("SMTP_FROM must be a valid email address: %w", err)
+	}
+	if (cfg.SMTPUsername == "") != (cfg.SMTPPassword == "") {
+		return Config{}, errors.New("SMTP_USERNAME and SMTP_PASSWORD must be configured together")
 	}
 	if cfg.AppEnv == "production" && !cfg.CookieSecure {
 		return Config{}, errors.New("COOKIE_SECURE must be true in production")

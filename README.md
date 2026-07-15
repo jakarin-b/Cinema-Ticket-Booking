@@ -17,6 +17,7 @@ flowchart LR
     Worker -->|seat events| PubSub
     Worker -->|publisher confirms| Rabbit[(RabbitMQ)]
     Rabbit -->|manual ack / retry / DLQ| Worker
+    Worker -->|booking confirmation| SMTP[SMTP / Mailpit]
     API --> OTEL[OpenTelemetry Collector]
     Worker --> OTEL
     OTEL --> Jaeger[Jaeger]
@@ -31,6 +32,7 @@ The deployable application remains one API, one background worker, and one front
 - **MongoDB** for movies, materialized showtime seats, holds, bookings, audit logs, identities, outbox events, and notification records.
 - **Redis** for all-or-nothing seat locks, OAuth state, application sessions, rate limits, and cross-process seat event fan-out.
 - **RabbitMQ** for durable `booking.confirmed` notification delivery with publisher confirms, retry queues, acknowledgements, and a DLQ.
+- **SMTP + Mailpit** for asynchronous booking-confirmation email and a credential-free local inbox.
 - **Vue 3 + TypeScript + Vite + Pinia** for the reviewer interface.
 - **Firebase Authentication and direct Google OpenID Connect** as two separate login paths that link to one local user.
 - **Docker Compose, Prometheus, OpenTelemetry, and Jaeger** for local delivery and inspection.
@@ -40,7 +42,7 @@ The deployable application remains one API, one background worker, and one front
 ```text
 backend/
   cmd/                 API, worker, seed, and concurrency executables
-  internal/            auth, domain, locks, services, HTTP, messaging, realtime
+  internal/            auth, domain, locks, mailer, services, HTTP, messaging, realtime
   docs/openapi.yaml    OpenAPI 3.1 contract
 frontend/
   src/                 Vue views, router, auth store, API client, styles
@@ -80,10 +82,27 @@ Local URLs:
 - Worker metrics/health: <http://localhost:9091/metrics>
 - Swagger UI: <http://localhost:8081>
 - RabbitMQ management: <http://localhost:15672>
+- Mailpit inbox: <http://localhost:8025>
 - Prometheus: <http://localhost:9090>
 - Jaeger: <http://localhost:16686>
 
 The application can start without cloud credentials so its public catalogue and infrastructure can be inspected, but `/health/ready` remains `503` and login endpoints return `AUTH_PROVIDER_UNAVAILABLE` until both providers are configured. There is intentionally no development authentication bypass.
+
+### Booking confirmation email
+
+After a booking commits, the existing `booking.confirmed` worker flow sends a plain-text confirmation to the verified email stored on the booking. The HTTP confirmation remains successful even if SMTP is temporarily unavailable; RabbitMQ retries email delivery and eventually routes repeated failures to the notification DLQ.
+
+Local Compose uses Mailpit without credentials. Complete a booking and open <http://localhost:8025> to inspect the message. To deliver real email, replace these environment values with an SMTP server that supports plain SMTP or STARTTLS:
+
+```dotenv
+SMTP_HOST=mail.example.com
+SMTP_PORT=587
+SMTP_USERNAME=cinema-smtp-user
+SMTP_PASSWORD=replace-with-a-secret
+SMTP_FROM=Cinema Ticket Booking <no-reply@example.com>
+```
+
+`SMTP_USERNAME` and `SMTP_PASSWORD` must either both be empty or both be configured. Implicit TLS on port 465 is not supported; use a STARTTLS endpoint such as port 587.
 
 ### Postman collection
 
@@ -149,7 +168,7 @@ Each provider identity is unique by `(provider, subject)`. A new identity may at
 15. **Build trusted booking data.** The server reloads the showtime seats, movie, and auditorium from MongoDB, sorts the seat labels, and calculates the total from stored seat prices. User identity, movie title, showtime, auditorium, prices, total, and currency are never accepted from the confirmation body.
 16. **Commit the booking atomically.** One MongoDB transaction conditionally changes the hold from `ACTIVE` to `CONFIRMED`, changes exactly its still-owned and unexpired seats from `LOCKED` to `BOOKED`, inserts the immutable booking, writes a `BOOKING_SUCCESS` audit log, and inserts a `PENDING` `booking.confirmed` outbox event. If any required state changed concurrently, the whole transaction aborts and no booking is created.
 17. **Clean up locks and update clients.** After the transaction commits, the API ownership-safely removes the Redis seat keys and publishes `seat.booked` with the booking ID. The HTTP response returns the booking number, selected seats, total amount in minor THB units, payment status, and booking status. Clients can then use `GET /api/v1/bookings/me` or `GET /api/v1/bookings/:bookingId` to read the durable result.
-18. **Deliver the asynchronous notification.** The worker leases the pending outbox row, publishes a persistent `booking.confirmed` message with mandatory routing and publisher confirms, and marks the row `PUBLISHED` only after RabbitMQ confirms it. The consumer reloads the booking, inserts a notification unique by `event_id`, logs the mock notification, and acknowledges the message. Failures use the configured retry queues and eventually reach the DLQ instead of changing the already committed booking result.
+18. **Deliver the asynchronous email.** The worker leases the pending outbox row, publishes a persistent `booking.confirmed` message with mandatory routing and publisher confirms, and marks the row `PUBLISHED` only after RabbitMQ confirms it. The consumer reloads the booking, sends a plain-text confirmation to the booking's verified email over SMTP, records the recipient, subject, body, and `sent_at` under the unique `event_id`, then acknowledges the message. Failures use the configured retry queues and eventually reach the DLQ instead of changing the already committed booking result.
 
 If the user abandons checkout, `DELETE /api/v1/holds/:holdId` transactionally changes an owned `ACTIVE` hold to `RELEASED`, returns only its matching seats to `AVAILABLE`, records the audit event, safely removes the Redis ownership keys, and publishes `seat.released`. If no manual release occurs, the worker finds the expired hold, performs the equivalent guarded transition to `EXPIRED`, and broadcasts the released seats. Neither path can release a confirmed booking or a seat now owned by another hold.
 
@@ -204,12 +223,14 @@ transactional outbox
         ↓ publisher confirm
 booking.confirmed exchange
         ↓ manual acknowledgement
-mock notification consumer
+email notification consumer
+        ↓ SMTP / STARTTLS
+user inbox or local Mailpit
 ```
 
 The worker leases pending outbox rows, publishes persistent messages with mandatory routing and confirms, then marks them published. Failure returns the row to `PENDING` with capped exponential backoff. This closes the post-commit message-loss window of direct publication.
 
-The notification consumer inserts a record unique by `event_id`, making redelivery idempotent. Failed handling routes through 5-second, 30-second, and 120-second retry queues. A fourth failure is negatively acknowledged without requeue and reaches `booking.notifications.dlq` through the dead-letter exchange.
+The notification consumer skips an `event_id` that already has a notification record. For a new event it validates the recipient, sends the email, and records delivery only after the SMTP server accepts the message. Failed handling routes through 5-second, 30-second, and 120-second retry queues. A fourth failure is negatively acknowledged without requeue and reaches `booking.notifications.dlq` through the dead-letter exchange.
 
 ## Audit logs
 
@@ -250,7 +271,8 @@ Successful holds: 1
 Conflicts: 49
 Unexpected errors: 0
 Double booking detected: false
-Booking event consumed: true
+Booking email delivered: true
+Duplicate booking email suppressed: true
 Booked seat protected: true
 Manual release verified: true
 Expiration verified: true
@@ -277,6 +299,7 @@ Real provider verification remains a browser test because Firebase and Google cr
 - Ownership checks on holds and bookings
 - One-megabyte request bodies and structural validation
 - Request IDs, recovery, safe error envelopes, structured logs, and security headers
+- Validated SMTP sender/recipient addresses and credentials kept in deployment secrets
 - Non-root API, worker, and frontend containers
 
 See [docs/threat-model.md](docs/threat-model.md) and [docs/secret-rotation.md](docs/secret-rotation.md).
@@ -299,6 +322,8 @@ See [docs/threat-model.md](docs/threat-model.md) and [docs/secret-rotation.md](d
 - Account linking intentionally trusts only provider-verified matching email and has no manual unlink UI.
 - Direct Google logout deletes the application session but does not revoke the wider Google session.
 - RabbitMQ, Redis, MongoDB, the API, and the worker each run as one local instance.
+- SMTP acceptance and the MongoDB notification record cannot share a transaction; a worker crash in that narrow window may cause one duplicate email on retry.
+- Mailpit captures local email only. Real inbox delivery requires an external SMTP service configured through environment variables.
 - External poster/font assets require internet access; functionality remains usable without them.
 
 Future production work would include multi-node MongoDB, Redis Sentinel/Cluster, a RabbitMQ cluster, TLS termination, centralized secrets, autoscaled WebSocket fan-out, alerting dashboards, a real payment workflow, cancellations/refunds, and Kubernetes deployment.

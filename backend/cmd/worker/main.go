@@ -12,6 +12,7 @@ import (
 
 	"github.com/cinema-ticket-booking/backend/internal/bootstrap"
 	seatlock "github.com/cinema-ticket-booking/backend/internal/lock"
+	"github.com/cinema-ticket-booking/backend/internal/mailer"
 	"github.com/cinema-ticket-booking/backend/internal/observability"
 	"github.com/cinema-ticket-booking/backend/internal/service"
 	workerpkg "github.com/cinema-ticket-booking/backend/internal/worker"
@@ -36,7 +37,8 @@ func main() {
 	metrics := observability.NewMetrics()
 	locks := seatlock.New(deps.Redis, deps.Config.SeatLockTTL)
 	booking := service.NewBookingService(deps.Store, deps.Redis, locks, deps.Config, metrics)
-	processor := workerpkg.NewProcessor(deps.Store, booking, deps.Rabbit, deps.Config, metrics)
+	emailSender := mailer.NewSMTP(deps.Config)
+	processor := workerpkg.NewProcessor(deps.Store, booking, deps.Rabbit, emailSender, deps.Config, metrics)
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, _ *http.Request) {

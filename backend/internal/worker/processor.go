@@ -11,6 +11,7 @@ import (
 	"github.com/cinema-ticket-booking/backend/internal/config"
 	"github.com/cinema-ticket-booking/backend/internal/database"
 	"github.com/cinema-ticket-booking/backend/internal/domain"
+	"github.com/cinema-ticket-booking/backend/internal/mailer"
 	"github.com/cinema-ticket-booking/backend/internal/messaging"
 	"github.com/cinema-ticket-booking/backend/internal/observability"
 	"github.com/cinema-ticket-booking/backend/internal/service"
@@ -29,12 +30,13 @@ type Processor struct {
 	store   *database.Store
 	booking *service.BookingService
 	rabbit  *messaging.Rabbit
+	sender  mailer.Sender
 	cfg     config.Config
 	metrics *observability.Metrics
 }
 
-func NewProcessor(store *database.Store, booking *service.BookingService, rabbit *messaging.Rabbit, cfg config.Config, metrics *observability.Metrics) *Processor {
-	return &Processor{store: store, booking: booking, rabbit: rabbit, cfg: cfg, metrics: metrics}
+func NewProcessor(store *database.Store, booking *service.BookingService, rabbit *messaging.Rabbit, sender mailer.Sender, cfg config.Config, metrics *observability.Metrics) *Processor {
+	return &Processor{store: store, booking: booking, rabbit: rabbit, sender: sender, cfg: cfg, metrics: metrics}
 }
 
 func (p *Processor) RunExpiration(ctx context.Context) {
@@ -208,6 +210,12 @@ func (p *Processor) notify(ctx context.Context, payload []byte) error {
 	if event.EventID == "" {
 		return fmt.Errorf("event_id is required")
 	}
+	var existing domain.Notification
+	if err := p.store.DB.Collection("notifications").FindOne(ctx, bson.M{"event_id": event.EventID}).Decode(&existing); err == nil {
+		return nil
+	} else if err != mongo.ErrNoDocuments {
+		return err
+	}
 	bookingID, err := primitive.ObjectIDFromHex(event.BookingID)
 	if err != nil {
 		return err
@@ -216,16 +224,19 @@ func (p *Processor) notify(ctx context.Context, payload []byte) error {
 	if err := p.store.DB.Collection("bookings").FindOne(ctx, bson.M{"_id": bookingID}).Decode(&booking); err != nil {
 		return err
 	}
-	labels := make([]string, len(booking.Seats))
-	for i, seat := range booking.Seats {
-		labels[i] = seat.Label
+	if p.sender == nil {
+		return fmt.Errorf("booking email sender is unavailable")
 	}
-	message := fmt.Sprintf("Booking %s confirmed for %s; %s at %s; seats %v", booking.BookingNumber, booking.UserEmail, booking.MovieTitle, booking.ShowtimeStart.Format(time.RFC3339), labels)
-	notification := domain.Notification{ID: primitive.NewObjectID(), EventID: event.EventID, BookingID: booking.ID, Message: message, CreatedAt: time.Now().UTC()}
+	if err := p.sender.SendBookingConfirmation(ctx, event.EventID, booking); err != nil {
+		return err
+	}
+	subject, message := mailer.ConfirmationContent(booking)
+	now := time.Now().UTC()
+	notification := domain.Notification{ID: primitive.NewObjectID(), EventID: event.EventID, BookingID: booking.ID, Recipient: booking.UserEmail, Subject: subject, Message: message, SentAt: now, CreatedAt: now}
 	if _, err := p.store.DB.Collection("notifications").InsertOne(ctx, notification); err != nil && !mongo.IsDuplicateKeyError(err) {
 		return err
 	}
-	slog.Info("mock booking notification", "event_id", event.EventID, "booking_number", booking.BookingNumber, "user", booking.UserEmail, "movie", booking.MovieTitle, "showtime", booking.ShowtimeStart, "seats", labels)
+	slog.Info("booking confirmation email sent", "event_id", event.EventID, "booking_number", booking.BookingNumber, "recipient", booking.UserEmail)
 	return nil
 }
 

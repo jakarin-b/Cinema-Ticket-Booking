@@ -166,7 +166,10 @@ type Notification struct {
 	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	EventID   string             `bson:"event_id" json:"event_id"`
 	BookingID primitive.ObjectID `bson:"booking_id" json:"booking_id"`
+	Recipient string             `bson:"recipient,omitempty" json:"recipient,omitempty"`
+	Subject   string             `bson:"subject,omitempty" json:"subject,omitempty"`
 	Message   string             `bson:"message" json:"message"`
+	SentAt    time.Time          `bson:"sent_at,omitempty" json:"sent_at,omitempty"`
 	CreatedAt time.Time          `bson:"created_at" json:"created_at"`
 }
 
