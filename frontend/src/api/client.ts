@@ -25,6 +25,24 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<Enve
 }
 
 export function idempotencyKey(): string { return crypto.randomUUID() }
+export function stableIdempotencyKey(scope: string, fingerprint = ''): string {
+  const storageKey = `idempotency:${scope}`
+  try {
+    const existing = JSON.parse(sessionStorage.getItem(storageKey) ?? 'null') as { fingerprint?: string; key?: string } | null
+    if (existing?.fingerprint === fingerprint && existing.key) return existing.key
+  } catch { /* replace malformed browser state */ }
+  const key = idempotencyKey()
+  try { sessionStorage.setItem(storageKey, JSON.stringify({ fingerprint, key })) } catch { /* storage may be unavailable */ }
+  return key
+}
+export function savedIdempotencyFingerprint(scope: string): string | null {
+  try {
+    const existing = JSON.parse(sessionStorage.getItem(`idempotency:${scope}`) ?? 'null') as { fingerprint?: string } | null
+    return typeof existing?.fingerprint === 'string' ? existing.fingerprint : null
+  } catch { return null }
+}
+export function clearIdempotencyKey(scope: string): void {
+  try { sessionStorage.removeItem(`idempotency:${scope}`) } catch { /* storage may be unavailable */ }
+}
 export function money(amount: number, currency = 'THB'): string { return new Intl.NumberFormat('en-TH', { style: 'currency', currency }).format(amount / 100) }
 export function localDate(value: string): string { return new Intl.DateTimeFormat('en-TH', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) }
-

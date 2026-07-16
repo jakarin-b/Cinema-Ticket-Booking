@@ -14,7 +14,6 @@ import (
 	"github.com/cinema-ticket-booking/backend/internal/database"
 	"github.com/cinema-ticket-booking/backend/internal/domain"
 	seatlock "github.com/cinema-ticket-booking/backend/internal/lock"
-	"github.com/cinema-ticket-booking/backend/internal/observability"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
@@ -32,16 +31,15 @@ var (
 )
 
 type BookingService struct {
-	store   *database.Store
-	redis   *redis.Client
-	locks   *seatlock.Manager
-	cfg     config.Config
-	metrics *observability.Metrics
-	now     func() time.Time
+	store *database.Store
+	redis *redis.Client
+	locks *seatlock.Manager
+	cfg   config.Config
+	now   func() time.Time
 }
 
-func NewBookingService(store *database.Store, redisClient *redis.Client, locks *seatlock.Manager, cfg config.Config, metrics *observability.Metrics) *BookingService {
-	return &BookingService{store: store, redis: redisClient, locks: locks, cfg: cfg, metrics: metrics, now: func() time.Time { return time.Now().UTC() }}
+func NewBookingService(store *database.Store, redisClient *redis.Client, locks *seatlock.Manager, cfg config.Config) *BookingService {
+	return &BookingService{store: store, redis: redisClient, locks: locks, cfg: cfg, now: func() time.Time { return time.Now().UTC() }}
 }
 
 type HoldResult struct {
@@ -50,8 +48,8 @@ type HoldResult struct {
 }
 
 func (s *BookingService) CreateHold(ctx context.Context, user domain.User, showtimeID primitive.ObjectID, rawSeatIDs []string, idempotencyKey string) (*HoldResult, error) {
-	if idempotencyKey == "" {
-		return nil, problem(400, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key header is required.", nil)
+	if err := validateIdempotencyKey(idempotencyKey); err != nil {
+		return nil, err
 	}
 	seatIDs, seatStrings, err := normalizeIDs(rawSeatIDs)
 	if err != nil || len(seatIDs) == 0 || len(seatIDs) > 10 {
@@ -59,6 +57,9 @@ func (s *BookingService) CreateHold(ctx context.Context, user domain.User, showt
 	}
 	var existing domain.Hold
 	if err := s.store.DB.Collection("holds").FindOne(ctx, bson.M{"user_id": user.ID, "idempotency_key": idempotencyKey}).Decode(&existing); err == nil {
+		if !sameHoldRequest(existing, showtimeID, seatStrings) {
+			return nil, problem(409, "IDEMPOTENCY_KEY_REUSED", "Idempotency-Key was already used for a different hold request.", nil)
+		}
 		return &HoldResult{Hold: existing, Existing: true}, nil
 	} else if err != mongo.ErrNoDocuments {
 		return nil, err
@@ -89,8 +90,6 @@ func (s *BookingService) CreateHold(ctx context.Context, user domain.User, showt
 		return nil, problem(503, "LOCK_SERVICE_UNAVAILABLE", "Seat locking is temporarily unavailable.", nil)
 	}
 	if conflictKey != "" {
-		s.metrics.LockConflicts.Inc()
-		s.metrics.Holds.WithLabelValues("conflict").Inc()
 		seatID := conflictKey
 		if index := strings.LastIndex(conflictKey, ":"); index >= 0 {
 			seatID = conflictKey[index+1:]
@@ -116,6 +115,9 @@ func (s *BookingService) CreateHold(ctx context.Context, user domain.User, showt
 		s.auditSystemError(ctx, user.ID, "hold", hold.ID.Hex(), "MongoDB hold transaction failed after Redis acquisition", errors.Join(txErr, releaseErr))
 		if mongo.IsDuplicateKeyError(txErr) {
 			if err := s.store.DB.Collection("holds").FindOne(ctx, bson.M{"user_id": user.ID, "idempotency_key": idempotencyKey}).Decode(&existing); err == nil {
+				if !sameHoldRequest(existing, showtimeID, seatStrings) {
+					return nil, problem(409, "IDEMPOTENCY_KEY_REUSED", "Idempotency-Key was already used for a different hold request.", nil)
+				}
 				return &HoldResult{Hold: existing, Existing: true}, nil
 			}
 		}
@@ -124,7 +126,6 @@ func (s *BookingService) CreateHold(ctx context.Context, user domain.User, showt
 		}
 		return nil, problem(500, "HOLD_CREATION_FAILED", "The hold could not be created.", nil)
 	}
-	s.metrics.Holds.WithLabelValues("created").Inc()
 	s.publishSeatEvent(ctx, "seat.locked", showtimeID, seatStrings, map[string]any{"expires_at": hold.ExpiresAt})
 	return &HoldResult{Hold: hold}, nil
 }
@@ -186,20 +187,27 @@ func (s *BookingService) ReleaseHold(ctx context.Context, user domain.User, hold
 	if _, err := s.locks.Release(ctx, keys, ownership); err != nil {
 		s.auditSystemError(ctx, user.ID, "hold", hold.ID.Hex(), "safe Redis release failed", err)
 	}
-	s.metrics.Holds.WithLabelValues("released").Inc()
 	s.publishSeatEvent(ctx, "seat.released", hold.ShowtimeID, objectIDStrings(hold.SeatIDs), nil)
 	return hold, nil
 }
 
 func (s *BookingService) Confirm(ctx context.Context, user domain.User, holdID primitive.ObjectID, idempotencyKey, paymentMethod string) (*domain.Booking, bool, error) {
-	if idempotencyKey == "" {
-		return nil, false, problem(400, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key header is required.", nil)
+	if err := validateIdempotencyKey(idempotencyKey); err != nil {
+		return nil, false, err
 	}
 	if paymentMethod != "MOCK" {
 		return nil, false, problem(422, "INVALID_PAYMENT_METHOD", "Only MOCK payment is supported.", nil)
 	}
 	var existing domain.Booking
 	if err := s.store.DB.Collection("bookings").FindOne(ctx, bson.M{"user_id": user.ID, "confirmation_idempotency_key": idempotencyKey}).Decode(&existing); err == nil {
+		if existing.HoldID != holdID {
+			return nil, false, problem(409, "IDEMPOTENCY_KEY_REUSED", "Idempotency-Key was already used to confirm a different hold.", nil)
+		}
+		return &existing, true, nil
+	} else if err != mongo.ErrNoDocuments {
+		return nil, false, err
+	}
+	if err := s.store.DB.Collection("bookings").FindOne(ctx, bson.M{"hold_id": holdID, "user_id": user.ID}).Decode(&existing); err == nil {
 		return &existing, true, nil
 	} else if err != mongo.ErrNoDocuments {
 		return nil, false, err
@@ -214,8 +222,8 @@ func (s *BookingService) Confirm(ctx context.Context, user domain.User, holdID p
 	if hold.UserID != user.ID {
 		return nil, false, problem(403, "FORBIDDEN", "Only the hold owner may confirm it.", nil)
 	}
-	now := s.now()
-	if hold.Status != domain.HoldActive || !now.Before(hold.ExpiresAt) {
+	requestTime := s.now()
+	if hold.Status != domain.HoldActive || !requestTime.Before(hold.ExpiresAt) {
 		return nil, false, problem(409, "HOLD_EXPIRED", "The hold is no longer active.", nil)
 	}
 	keys := seatlock.Keys(hold.ShowtimeID.Hex(), objectIDStrings(hold.SeatIDs))
@@ -259,18 +267,21 @@ func (s *BookingService) Confirm(ctx context.Context, user domain.User, holdID p
 		total += seat.Price
 	}
 	sort.Slice(bookingSeats, func(i, j int) bool { return bookingSeats[i].Label < bookingSeats[j].Label })
-	booking := domain.Booking{ID: primitive.NewObjectID(), BookingNumber: "BKG-" + now.Format("20060102") + "-" + strings.ToUpper(strings.ReplaceAll(uuid.NewString(), "-", "")[:8]), HoldID: hold.ID, UserID: user.ID, UserEmail: user.Email, ShowtimeID: show.ID, MovieID: movie.ID, MovieTitle: movie.Title, ShowtimeStart: show.StartTime, AuditoriumName: auditorium.Name, Seats: bookingSeats, TotalAmount: total, Currency: "THB", PaymentStatus: "PAID", BookingStatus: "CONFIRMED", ConfirmationIdempotencyKey: idempotencyKey, CreatedAt: now, UpdatedAt: now}
+	booking := domain.Booking{ID: primitive.NewObjectID(), BookingNumber: "BKG-" + requestTime.Format("20060102") + "-" + strings.ToUpper(strings.ReplaceAll(uuid.NewString(), "-", "")[:8]), HoldID: hold.ID, UserID: user.ID, UserEmail: user.Email, ShowtimeID: show.ID, MovieID: movie.ID, MovieTitle: movie.Title, ShowtimeStart: show.StartTime, AuditoriumName: auditorium.Name, Seats: bookingSeats, TotalAmount: total, Currency: "THB", PaymentStatus: "PAID", BookingStatus: "CONFIRMED", ConfirmationIdempotencyKey: idempotencyKey}
 	eventID := uuid.NewString()
 	seatStrings := objectIDStrings(hold.SeatIDs)
 	_, txErr := s.store.WithTransaction(ctx, func(sc mongo.SessionContext) (any, error) {
-		res, err := s.store.DB.Collection("holds").UpdateOne(sc, bson.M{"_id": hold.ID, "user_id": user.ID, "status": domain.HoldActive, "expires_at": bson.M{"$gt": now}}, bson.M{"$set": bson.M{"status": domain.HoldConfirmed, "updated_at": now}})
+		transactionTime := s.now()
+		booking.CreatedAt = transactionTime
+		booking.UpdatedAt = transactionTime
+		res, err := s.store.DB.Collection("holds").UpdateOne(sc, bson.M{"_id": hold.ID, "user_id": user.ID, "status": domain.HoldActive, "expires_at": bson.M{"$gt": transactionTime}}, bson.M{"$set": bson.M{"status": domain.HoldConfirmed, "updated_at": transactionTime}})
 		if err != nil {
 			return nil, err
 		}
 		if res.ModifiedCount != 1 {
 			return nil, errHoldNoLongerConfirmable
 		}
-		res, err = s.store.DB.Collection("showtime_seats").UpdateMany(sc, bson.M{"showtime_id": hold.ShowtimeID, "seat_id": bson.M{"$in": hold.SeatIDs}, "status": domain.SeatLocked, "hold_id": hold.ID, "locked_by_user_id": user.ID, "lock_expires_at": bson.M{"$gt": now}}, bson.M{"$set": bson.M{"status": domain.SeatBooked, "booking_id": booking.ID, "updated_at": now}, "$unset": bson.M{"hold_id": "", "locked_by_user_id": "", "lock_expires_at": ""}, "$inc": bson.M{"version": 1}})
+		res, err = s.store.DB.Collection("showtime_seats").UpdateMany(sc, bson.M{"showtime_id": hold.ShowtimeID, "seat_id": bson.M{"$in": hold.SeatIDs}, "status": domain.SeatLocked, "hold_id": hold.ID, "locked_by_user_id": user.ID, "lock_expires_at": bson.M{"$gt": transactionTime}}, bson.M{"$set": bson.M{"status": domain.SeatBooked, "booking_id": booking.ID, "updated_at": transactionTime}, "$unset": bson.M{"hold_id": "", "locked_by_user_id": "", "lock_expires_at": ""}, "$inc": bson.M{"version": 1}})
 		if err != nil {
 			return nil, err
 		}
@@ -280,19 +291,20 @@ func (s *BookingService) Confirm(ctx context.Context, user domain.User, holdID p
 		if _, err = s.store.DB.Collection("bookings").InsertOne(sc, booking); err != nil {
 			return nil, err
 		}
-		audit := domain.AuditLog{ID: primitive.NewObjectID(), EventType: "BOOKING_SUCCESS", ActorUserID: &user.ID, EntityType: "booking", EntityID: booking.ID.Hex(), Metadata: map[string]any{"booking_number": booking.BookingNumber, "seat_ids": seatStrings}, Severity: "INFO", CreatedAt: now}
+		audit := domain.AuditLog{ID: primitive.NewObjectID(), EventType: "BOOKING_SUCCESS", ActorUserID: &user.ID, EntityType: "booking", EntityID: booking.ID.Hex(), Metadata: map[string]any{"booking_number": booking.BookingNumber, "seat_ids": seatStrings}, Severity: "INFO", CreatedAt: transactionTime}
 		if _, err = s.store.DB.Collection("audit_logs").InsertOne(sc, audit); err != nil {
 			return nil, err
 		}
-		outbox := domain.OutboxEvent{ID: primitive.NewObjectID(), EventID: eventID, EventType: "booking.confirmed", Payload: map[string]any{"event_id": eventID, "event_type": "booking.confirmed", "occurred_at": now, "booking_id": booking.ID.Hex(), "user_id": user.ID.Hex(), "showtime_id": show.ID.Hex(), "seat_ids": seatStrings}, Status: "PENDING", Attempts: 0, NextAttemptAt: now, CreatedAt: now}
+		outbox := domain.OutboxEvent{ID: primitive.NewObjectID(), EventID: eventID, EventType: "booking.confirmed", Payload: map[string]any{"event_id": eventID, "event_type": "booking.confirmed", "occurred_at": transactionTime, "booking_id": booking.ID.Hex(), "user_id": user.ID.Hex(), "showtime_id": show.ID.Hex(), "seat_ids": seatStrings}, Status: "PENDING", Attempts: 0, NextAttemptAt: transactionTime, CreatedAt: transactionTime}
 		_, err = s.store.DB.Collection("outbox_events").InsertOne(sc, outbox)
 		return nil, err
 	})
 	if txErr != nil {
-		if mongo.IsDuplicateKeyError(txErr) {
-			if err := s.store.DB.Collection("bookings").FindOne(ctx, bson.M{"$or": bson.A{bson.M{"hold_id": hold.ID}, bson.M{"user_id": user.ID, "confirmation_idempotency_key": idempotencyKey}}}).Decode(&existing); err == nil {
-				return &existing, true, nil
-			}
+		if err := s.store.DB.Collection("bookings").FindOne(ctx, bson.M{"hold_id": hold.ID, "user_id": user.ID}).Decode(&existing); err == nil {
+			return &existing, true, nil
+		}
+		if err := s.store.DB.Collection("bookings").FindOne(ctx, bson.M{"user_id": user.ID, "confirmation_idempotency_key": idempotencyKey}).Decode(&existing); err == nil && existing.HoldID != hold.ID {
+			return nil, false, problem(409, "IDEMPOTENCY_KEY_REUSED", "Idempotency-Key was already used to confirm a different hold.", nil)
 		}
 		if errors.Is(txErr, errHoldNoLongerConfirmable) || errors.Is(txErr, errBookingSeatMismatch) {
 			return nil, false, problem(409, "HOLD_EXPIRED", "The hold could not be confirmed.", nil)
@@ -303,7 +315,6 @@ func (s *BookingService) Confirm(ctx context.Context, user domain.User, holdID p
 	if _, err := s.locks.Release(ctx, keys, ownership); err != nil {
 		s.auditSystemError(ctx, user.ID, "booking", booking.ID.Hex(), "safe Redis cleanup after booking failed", err)
 	}
-	s.metrics.Bookings.Inc()
 	s.publishSeatEvent(ctx, "seat.booked", show.ID, seatStrings, map[string]any{"booking_id": booking.ID.Hex()})
 	return &booking, false, nil
 }
@@ -383,8 +394,9 @@ func (s *BookingService) expireOne(ctx context.Context, hold domain.Hold, now ti
 	}
 	keys := seatlock.Keys(hold.ShowtimeID.Hex(), objectIDStrings(hold.SeatIDs))
 	ownership := seatlock.Ownership(hold.ID.Hex(), hold.UserID.Hex(), hold.LockToken)
-	_, _ = s.locks.Release(ctx, keys, ownership)
-	s.metrics.ExpiredHolds.Inc()
+	if _, err := s.locks.Release(ctx, keys, ownership); err != nil {
+		s.auditSystemError(ctx, hold.UserID, "hold", hold.ID.Hex(), "worker safe Redis release failed", err)
+	}
 	s.publishSeatEvent(ctx, "seat.released", hold.ShowtimeID, objectIDStrings(hold.SeatIDs), map[string]any{"reason": "timeout"})
 	return true, nil
 }
@@ -463,6 +475,35 @@ func normalizeIDs(raw []string) ([]primitive.ObjectID, []string, error) {
 		ids = append(ids, id)
 	}
 	return ids, stringsOut, nil
+}
+
+func validateIdempotencyKey(value string) error {
+	if value == "" {
+		return problem(400, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key header is required.", nil)
+	}
+	if _, err := uuid.Parse(value); err != nil {
+		return problem(400, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key must be a valid UUID.", nil)
+	}
+	return nil
+}
+
+func sameHoldRequest(hold domain.Hold, showtimeID primitive.ObjectID, seatIDs []string) bool {
+	if hold.ShowtimeID != showtimeID {
+		return false
+	}
+	existingSeatIDs := objectIDStrings(hold.SeatIDs)
+	if len(existingSeatIDs) != len(seatIDs) {
+		return false
+	}
+	requestedSeatIDs := append([]string(nil), seatIDs...)
+	sort.Strings(existingSeatIDs)
+	sort.Strings(requestedSeatIDs)
+	for i := range existingSeatIDs {
+		if existingSeatIDs[i] != requestedSeatIDs[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func objectIDStrings(ids []primitive.ObjectID) []string {

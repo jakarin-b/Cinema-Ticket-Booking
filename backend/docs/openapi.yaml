@@ -149,6 +149,12 @@ paths:
                   uniqueItems: true
                   items: { type: string, pattern: '^[a-fA-F0-9]{24}$' }
       responses:
+        '400': { $ref: '#/components/responses/Error' }
+        '200':
+          description: Existing idempotent hold
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HoldEnvelope' }
         '201':
           description: Hold created
           content:
@@ -195,6 +201,7 @@ paths:
               properties:
                 payment_method: { type: string, const: MOCK }
       responses:
+        '400': { $ref: '#/components/responses/Error' }
         '201':
           description: Booking created
           content:
@@ -388,4 +395,3 @@ components:
         - $ref: '#/components/schemas/GenericEnvelope'
         - type: object
           properties: { data: { $ref: '#/components/schemas/Booking' } }
-

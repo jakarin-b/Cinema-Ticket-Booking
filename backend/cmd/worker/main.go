@@ -13,10 +13,8 @@ import (
 	"github.com/cinema-ticket-booking/backend/internal/bootstrap"
 	seatlock "github.com/cinema-ticket-booking/backend/internal/lock"
 	"github.com/cinema-ticket-booking/backend/internal/mailer"
-	"github.com/cinema-ticket-booking/backend/internal/observability"
 	"github.com/cinema-ticket-booking/backend/internal/service"
 	workerpkg "github.com/cinema-ticket-booking/backend/internal/worker"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -28,31 +26,23 @@ func main() {
 		os.Exit(1)
 	}
 	defer deps.Close(context.Background())
-	shutdownTracing, err := observability.InitTracing(ctx, deps.Config, "cinema-worker")
-	if err != nil {
-		slog.Warn("tracing initialization failed", "error", err)
-		shutdownTracing = func(context.Context) error { return nil }
-	}
-	defer shutdownTracing(context.Background())
-	metrics := observability.NewMetrics()
 	locks := seatlock.New(deps.Redis, deps.Config.SeatLockTTL)
-	booking := service.NewBookingService(deps.Store, deps.Redis, locks, deps.Config, metrics)
+	booking := service.NewBookingService(deps.Store, deps.Redis, locks, deps.Config)
 	emailSender := mailer.NewSMTP(deps.Config)
-	processor := workerpkg.NewProcessor(deps.Store, booking, deps.Rabbit, emailSender, deps.Config, metrics)
+	processor := workerpkg.NewProcessor(deps.Store, booking, deps.Rabbit, emailSender, deps.Config)
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"live"}`))
 	})
-	metricsServer := &http.Server{
-		Addr:              ":" + deps.Config.WorkerMetricsPort,
+	healthServer := &http.Server{
+		Addr:              ":" + deps.Config.WorkerHealthPort,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
-		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
-			slog.Error("worker metrics server stopped", "error", err)
+		if err := healthServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
+			slog.Error("worker health server stopped", "error", err)
 			stop()
 		}
 	}()
@@ -68,5 +58,5 @@ func main() {
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = metricsServer.Shutdown(shutdownCtx)
+	_ = healthServer.Shutdown(shutdownCtx)
 }

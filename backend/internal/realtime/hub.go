@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/cinema-ticket-booking/backend/internal/domain"
-	"github.com/cinema-ticket-booking/backend/internal/observability"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
@@ -28,15 +27,14 @@ type Hub struct {
 	rooms   map[string]map[*client]struct{}
 	redis   *redis.Client
 	allowed map[string]struct{}
-	metrics *observability.Metrics
 }
 
-func NewHub(redisClient *redis.Client, origins []string, metrics *observability.Metrics) *Hub {
+func NewHub(redisClient *redis.Client, origins []string) *Hub {
 	allowed := map[string]struct{}{}
 	for _, origin := range origins {
 		allowed[origin] = struct{}{}
 	}
-	return &Hub{rooms: map[string]map[*client]struct{}{}, redis: redisClient, allowed: allowed, metrics: metrics}
+	return &Hub{rooms: map[string]map[*client]struct{}{}, redis: redisClient, allowed: allowed}
 }
 
 func (h *Hub) Run(ctx context.Context) {
@@ -88,7 +86,6 @@ func (h *Hub) register(c *client) {
 		h.rooms[c.showtimeID] = map[*client]struct{}{}
 	}
 	h.rooms[c.showtimeID][c] = struct{}{}
-	h.metrics.ActiveWebSockets.Inc()
 }
 func (h *Hub) unregister(c *client) {
 	h.mu.Lock()
@@ -100,7 +97,6 @@ func (h *Hub) unregister(c *client) {
 	delete(room, c)
 	close(c.send)
 	_ = c.conn.Close()
-	h.metrics.ActiveWebSockets.Dec()
 	if len(room) == 0 {
 		delete(h.rooms, c.showtimeID)
 	}

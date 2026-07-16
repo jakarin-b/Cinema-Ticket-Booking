@@ -14,7 +14,6 @@ import (
 	"github.com/cinema-ticket-booking/backend/internal/bootstrap"
 	"github.com/cinema-ticket-booking/backend/internal/httpapi"
 	seatlock "github.com/cinema-ticket-booking/backend/internal/lock"
-	"github.com/cinema-ticket-booking/backend/internal/observability"
 	"github.com/cinema-ticket-booking/backend/internal/realtime"
 	"github.com/cinema-ticket-booking/backend/internal/service"
 )
@@ -28,15 +27,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer deps.Close(context.Background())
-	shutdownTracing, err := observability.InitTracing(ctx, deps.Config, "cinema-api")
-	if err != nil {
-		slog.Warn("tracing initialization failed", "error", err)
-		shutdownTracing = func(context.Context) error { return nil }
-	}
-	defer shutdownTracing(context.Background())
-	metrics := observability.NewMetrics()
 	locks := seatlock.New(deps.Redis, deps.Config.SeatLockTTL)
-	booking := service.NewBookingService(deps.Store, deps.Redis, locks, deps.Config, metrics)
+	booking := service.NewBookingService(deps.Store, deps.Redis, locks, deps.Config)
 	catalog := service.NewCatalogService(deps.Store)
 	admin := service.NewAdminService(deps.Store)
 	firebase, err := appauth.NewFirebase(ctx, deps.Config)
@@ -46,10 +38,10 @@ func main() {
 	}
 	googleOAuth := appauth.NewGoogleOAuth(deps.Redis, deps.Config)
 	authService := appauth.NewService(deps.Store, deps.Redis, deps.Config, firebase)
-	hub := realtime.NewHub(deps.Redis, deps.Config.AllowedOrigins, metrics)
+	hub := realtime.NewHub(deps.Redis, deps.Config.AllowedOrigins)
 	go hub.Run(ctx)
 	handlers := httpapi.NewHandlers(deps.Config, deps.Store, deps.Redis, deps.Rabbit, authService, firebase, googleOAuth, catalog, booking, admin, hub)
-	router := httpapi.Router(deps.Config, handlers, authService, deps.Redis, metrics)
+	router := httpapi.Router(deps.Config, handlers, authService, deps.Redis)
 	server := &http.Server{Addr: ":" + deps.Config.HTTPPort, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		slog.Info("API listening", "port", deps.Config.HTTPPort, "firebase_configured", firebase.Available(), "google_oauth_configured", googleOAuth.Available())

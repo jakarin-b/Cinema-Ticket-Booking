@@ -22,7 +22,6 @@ import (
 	"github.com/cinema-ticket-booking/backend/internal/domain"
 	"github.com/cinema-ticket-booking/backend/internal/httpapi"
 	seatlock "github.com/cinema-ticket-booking/backend/internal/lock"
-	"github.com/cinema-ticket-booking/backend/internal/observability"
 	"github.com/cinema-ticket-booking/backend/internal/service"
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
@@ -41,6 +40,12 @@ type apiEnvelope struct {
 	Data map[string]any `json:"data"`
 }
 
+type errorEnvelope struct {
+	Error struct {
+		Code string `json:"code"`
+	} `json:"error"`
+}
+
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -53,15 +58,14 @@ func main() {
 		testConfig.AdminEmails[email] = struct{}{}
 	}
 	testConfig.AdminEmails["concurrency-admin@example.test"] = struct{}{}
-	metrics := observability.NewMetrics()
 	locks := seatlock.New(deps.Redis, testConfig.SeatLockTTL)
-	bookingService := service.NewBookingService(deps.Store, deps.Redis, locks, testConfig, metrics)
+	bookingService := service.NewBookingService(deps.Store, deps.Redis, locks, testConfig)
 	catalog := service.NewCatalogService(deps.Store)
 	admin := service.NewAdminService(deps.Store)
 	verifier := fakeFirebase{}
 	authService := appauth.NewService(deps.Store, deps.Redis, testConfig, verifier)
 	handlers := httpapi.NewHandlers(testConfig, deps.Store, deps.Redis, nil, authService, verifier, nil, catalog, bookingService, admin, nil)
-	server := httptest.NewServer(httpapi.Router(testConfig, handlers, authService, deps.Redis, metrics))
+	server := httptest.NewServer(httpapi.Router(testConfig, handlers, authService, deps.Redis))
 	defer server.Close()
 	fixture := createFixture(ctx, deps)
 	defer cleanup(ctx, deps, fixture)
@@ -113,15 +117,35 @@ func main() {
 	active, _ := deps.Store.DB.Collection("holds").CountDocuments(ctx, bson.M{"showtime_id": fixture.showtime, "status": domain.HoldActive})
 	invariantOK = invariantOK && active == 1
 	confirmationKey := uuid.NewString()
-	status1, first, err1 := request(server.URL+"/api/v1/holds/"+holdID+"/confirm", token, confirmationKey, map[string]any{"payment_method": "MOCK"})
-	status2, second, err2 := request(server.URL+"/api/v1/holds/"+holdID+"/confirm", token, confirmationKey, map[string]any{"payment_method": "MOCK"})
-	if err1 != nil || err2 != nil || status1 != http.StatusCreated || status2 != http.StatusOK {
-		invariantOK = false
+	type confirmationResult struct {
+		status int
+		body   []byte
+		err    error
 	}
+	confirmationResults := make([]confirmationResult, 2)
+	confirmationStart := make(chan struct{})
+	wait.Add(2)
+	for i := range confirmationResults {
+		go func(index int) {
+			defer wait.Done()
+			<-confirmationStart
+			status, body, err := request(server.URL+"/api/v1/holds/"+holdID+"/confirm", token, confirmationKey, map[string]any{"payment_method": "MOCK"})
+			confirmationResults[index] = confirmationResult{status: status, body: body, err: err}
+		}(i)
+	}
+	close(confirmationStart)
+	wait.Wait()
+	sort.Slice(confirmationResults, func(i, j int) bool { return confirmationResults[i].status < confirmationResults[j].status })
+	status1, first, err1 := confirmationResults[0].status, confirmationResults[0].body, confirmationResults[0].err
+	status2, second, err2 := confirmationResults[1].status, confirmationResults[1].body, confirmationResults[1].err
 	var firstEnvelope, secondEnvelope apiEnvelope
 	_ = json.Unmarshal(first, &firstEnvelope)
 	_ = json.Unmarshal(second, &secondEnvelope)
-	invariantOK = invariantOK && firstEnvelope.Data["id"] == secondEnvelope.Data["id"]
+	status3, third, err3 := request(server.URL+"/api/v1/holds/"+holdID+"/confirm", token, uuid.NewString(), map[string]any{"payment_method": "MOCK"})
+	var thirdEnvelope apiEnvelope
+	_ = json.Unmarshal(third, &thirdEnvelope)
+	confirmationIdempotent := err1 == nil && err2 == nil && err3 == nil && status1 == http.StatusOK && status2 == http.StatusCreated && status3 == http.StatusOK && firstEnvelope.Data["id"] == secondEnvelope.Data["id"] && secondEnvelope.Data["id"] == thirdEnvelope.Data["id"]
+	invariantOK = invariantOK && confirmationIdempotent
 	bookings, _ := deps.Store.DB.Collection("bookings").CountDocuments(ctx, bson.M{"showtime_id": fixture.showtime})
 	var seat domain.ShowtimeSeat
 	_ = deps.Store.DB.Collection("showtime_seats").FindOne(ctx, bson.M{"showtime_id": fixture.showtime, "seat_id": fixture.seat}).Decode(&seat)
@@ -135,6 +159,12 @@ func main() {
 	bookedRetryStatus, _, _ := request(server.URL+"/api/v1/showtimes/"+fixture.showtime.Hex()+"/holds", "booked-retry", uuid.NewString(), map[string]any{"seat_ids": []string{fixture.seat.Hex()}})
 	bookedSeatProtected := bookedRetryStatus == http.StatusConflict
 	invariantOK = invariantOK && bookedSeatProtected
+	atomicMultiSeat := verifyAtomicMultiSeat(ctx, deps, server.URL, fixture)
+	invariantOK = invariantOK && atomicMultiSeat
+	idempotencyAndOwnership := verifyHoldIdempotencyAndOwnership(ctx, deps, server.URL, fixture)
+	invariantOK = invariantOK && idempotencyAndOwnership
+	confirmationKeyScoped := verifyConfirmationKeyScope(ctx, deps, server.URL, fixture, token, confirmationKey)
+	invariantOK = invariantOK && confirmationKeyScoped
 	manualReleased := verifyManualRelease(ctx, deps, server.URL, fixture)
 	invariantOK = invariantOK && manualReleased
 	expiredSafely := verifyExpiration(ctx, deps, server.URL, fixture)
@@ -152,6 +182,10 @@ func main() {
 	fmt.Printf("Booking email delivered: %t\n", notificationDelivered)
 	fmt.Printf("Duplicate booking email suppressed: %t\n", duplicateNotificationSuppressed)
 	fmt.Printf("Booked seat protected: %t\n", bookedSeatProtected)
+	fmt.Printf("Concurrent/repeated confirmation verified: %t\n", confirmationIdempotent)
+	fmt.Printf("Atomic multi-seat acquisition verified: %t\n", atomicMultiSeat)
+	fmt.Printf("Hold idempotency and ownership verified: %t\n", idempotencyAndOwnership)
+	fmt.Printf("Confirmation idempotency scope verified: %t\n", confirmationKeyScoped)
 	fmt.Printf("Manual release verified: %t\n", manualReleased)
 	fmt.Printf("Expiration verified: %t\n", expiredSafely)
 	fmt.Printf("Authentication linking/session/CSRF/role checks verified: %t\n", authSecurity)
@@ -230,16 +264,33 @@ func verifyAuthSecurity(ctx context.Context, deps *bootstrap.Dependencies, serve
 	return errors.Is(err, appauth.ErrUnauthenticated)
 }
 
-type fixtureIDs struct{ movie, auditorium, seat, expiringSeat, releaseSeat, showtime primitive.ObjectID }
+type fixtureIDs struct {
+	movie, auditorium, showtime                                        primitive.ObjectID
+	seat, expiringSeat, releaseSeat, atomicBlockedSeat, atomicFreeSeat primitive.ObjectID
+	idempotencySeat, confirmationIdempotencySeat                       primitive.ObjectID
+}
 
 func createFixture(ctx context.Context, deps *bootstrap.Dependencies) fixtureIDs {
 	now := time.Now().UTC()
-	fixture := fixtureIDs{movie: primitive.NewObjectID(), auditorium: primitive.NewObjectID(), seat: primitive.NewObjectID(), expiringSeat: primitive.NewObjectID(), releaseSeat: primitive.NewObjectID(), showtime: primitive.NewObjectID()}
+	fixture := fixtureIDs{
+		movie: primitive.NewObjectID(), auditorium: primitive.NewObjectID(), showtime: primitive.NewObjectID(),
+		seat: primitive.NewObjectID(), expiringSeat: primitive.NewObjectID(), releaseSeat: primitive.NewObjectID(),
+		atomicBlockedSeat: primitive.NewObjectID(), atomicFreeSeat: primitive.NewObjectID(),
+		idempotencySeat: primitive.NewObjectID(), confirmationIdempotencySeat: primitive.NewObjectID(),
+	}
 	_, err := deps.Store.DB.Collection("movies").InsertOne(ctx, domain.Movie{ID: fixture.movie, Title: "Concurrency Fixture", DurationMinutes: 90, Status: "ACTIVE", CreatedAt: now, UpdatedAt: now})
 	must(err)
-	_, err = deps.Store.DB.Collection("auditoriums").InsertOne(ctx, domain.Auditorium{ID: fixture.auditorium, Name: "Concurrency Fixture", Rows: 1, SeatsPerRow: 3, CreatedAt: now, UpdatedAt: now})
+	_, err = deps.Store.DB.Collection("auditoriums").InsertOne(ctx, domain.Auditorium{ID: fixture.auditorium, Name: "Concurrency Fixture", Rows: 1, SeatsPerRow: 7, CreatedAt: now, UpdatedAt: now})
 	must(err)
-	seatFixtures := []domain.AuditoriumSeat{{ID: fixture.seat, AuditoriumID: fixture.auditorium, Row: "T", Number: 1, Label: "T1", SeatType: "STANDARD"}, {ID: fixture.expiringSeat, AuditoriumID: fixture.auditorium, Row: "T", Number: 2, Label: "T2", SeatType: "STANDARD"}, {ID: fixture.releaseSeat, AuditoriumID: fixture.auditorium, Row: "T", Number: 3, Label: "T3", SeatType: "STANDARD"}}
+	seatFixtures := []domain.AuditoriumSeat{
+		{ID: fixture.seat, AuditoriumID: fixture.auditorium, Row: "T", Number: 1, Label: "T1", SeatType: "STANDARD"},
+		{ID: fixture.expiringSeat, AuditoriumID: fixture.auditorium, Row: "T", Number: 2, Label: "T2", SeatType: "STANDARD"},
+		{ID: fixture.releaseSeat, AuditoriumID: fixture.auditorium, Row: "T", Number: 3, Label: "T3", SeatType: "STANDARD"},
+		{ID: fixture.atomicBlockedSeat, AuditoriumID: fixture.auditorium, Row: "T", Number: 4, Label: "T4", SeatType: "STANDARD"},
+		{ID: fixture.atomicFreeSeat, AuditoriumID: fixture.auditorium, Row: "T", Number: 5, Label: "T5", SeatType: "STANDARD"},
+		{ID: fixture.idempotencySeat, AuditoriumID: fixture.auditorium, Row: "T", Number: 6, Label: "T6", SeatType: "STANDARD"},
+		{ID: fixture.confirmationIdempotencySeat, AuditoriumID: fixture.auditorium, Row: "T", Number: 7, Label: "T7", SeatType: "STANDARD"},
+	}
 	for _, seat := range seatFixtures {
 		_, err = deps.Store.DB.Collection("auditorium_seats").InsertOne(ctx, seat)
 		must(err)
@@ -289,7 +340,107 @@ func cleanup(ctx context.Context, deps *bootstrap.Dependencies, fixture fixtureI
 		_, _ = deps.Store.DB.Collection("auth_identities").DeleteMany(ctx, bson.M{"user_id": bson.M{"$in": ids}})
 		_, _ = deps.Store.DB.Collection("users").DeleteMany(ctx, bson.M{"_id": bson.M{"$in": ids}})
 	}
-	_ = deps.Redis.Del(ctx, seatlock.SeatKey(fixture.showtime.Hex(), fixture.seat.Hex()), seatlock.SeatKey(fixture.showtime.Hex(), fixture.expiringSeat.Hex()), seatlock.SeatKey(fixture.showtime.Hex(), fixture.releaseSeat.Hex())).Err()
+	_ = deps.Redis.Del(ctx,
+		seatlock.SeatKey(fixture.showtime.Hex(), fixture.seat.Hex()),
+		seatlock.SeatKey(fixture.showtime.Hex(), fixture.expiringSeat.Hex()),
+		seatlock.SeatKey(fixture.showtime.Hex(), fixture.releaseSeat.Hex()),
+		seatlock.SeatKey(fixture.showtime.Hex(), fixture.atomicBlockedSeat.Hex()),
+		seatlock.SeatKey(fixture.showtime.Hex(), fixture.atomicFreeSeat.Hex()),
+		seatlock.SeatKey(fixture.showtime.Hex(), fixture.idempotencySeat.Hex()),
+		seatlock.SeatKey(fixture.showtime.Hex(), fixture.confirmationIdempotencySeat.Hex()),
+	).Err()
+}
+
+func verifyAtomicMultiSeat(ctx context.Context, deps *bootstrap.Dependencies, serverURL string, fixture fixtureIDs) bool {
+	owner := "atomic-owner"
+	status, raw, err := request(serverURL+"/api/v1/showtimes/"+fixture.showtime.Hex()+"/holds", owner, uuid.NewString(), map[string]any{"seat_ids": []string{fixture.atomicBlockedSeat.Hex()}})
+	if err != nil || status != http.StatusCreated {
+		return false
+	}
+	var envelope apiEnvelope
+	if json.Unmarshal(raw, &envelope) != nil {
+		return false
+	}
+	holdID := fmt.Sprint(envelope.Data["hold_id"])
+	status, _, err = request(serverURL+"/api/v1/showtimes/"+fixture.showtime.Hex()+"/holds", "atomic-contender", uuid.NewString(), map[string]any{"seat_ids": []string{fixture.atomicFreeSeat.Hex(), fixture.atomicBlockedSeat.Hex()}})
+	if err != nil || status != http.StatusConflict {
+		return false
+	}
+	var freeSeat domain.ShowtimeSeat
+	if err := deps.Store.DB.Collection("showtime_seats").FindOne(ctx, bson.M{"showtime_id": fixture.showtime, "seat_id": fixture.atomicFreeSeat}).Decode(&freeSeat); err != nil {
+		return false
+	}
+	freeKeyExists, err := deps.Redis.Exists(ctx, seatlock.SeatKey(fixture.showtime.Hex(), fixture.atomicFreeSeat.Hex())).Result()
+	if err != nil || freeSeat.Status != domain.SeatAvailable || freeKeyExists != 0 {
+		return false
+	}
+	status, _, err = doRequest(http.MethodDelete, serverURL+"/api/v1/holds/"+holdID, owner, "", nil)
+	return err == nil && status == http.StatusOK
+}
+
+func verifyHoldIdempotencyAndOwnership(ctx context.Context, deps *bootstrap.Dependencies, serverURL string, fixture fixtureIDs) bool {
+	owner := "idempotency-owner"
+	endpoint := serverURL + "/api/v1/showtimes/" + fixture.showtime.Hex() + "/holds"
+	status, invalidBody, err := request(endpoint, owner, "not-a-uuid", map[string]any{"seat_ids": []string{fixture.idempotencySeat.Hex()}})
+	if err != nil || status != http.StatusBadRequest || responseErrorCode(invalidBody) != "INVALID_IDEMPOTENCY_KEY" {
+		return false
+	}
+	key := uuid.NewString()
+	status, raw, err := request(endpoint, owner, key, map[string]any{"seat_ids": []string{fixture.idempotencySeat.Hex()}})
+	if err != nil || status != http.StatusCreated {
+		return false
+	}
+	var created apiEnvelope
+	if json.Unmarshal(raw, &created) != nil {
+		return false
+	}
+	holdID := fmt.Sprint(created.Data["hold_id"])
+	status, raw, err = request(endpoint, owner, key, map[string]any{"seat_ids": []string{fixture.idempotencySeat.Hex()}})
+	if err != nil || status != http.StatusOK {
+		return false
+	}
+	var repeated apiEnvelope
+	if json.Unmarshal(raw, &repeated) != nil || repeated.Data["hold_id"] != created.Data["hold_id"] {
+		return false
+	}
+	status, reusedBody, err := request(endpoint, owner, key, map[string]any{"seat_ids": []string{fixture.atomicFreeSeat.Hex()}})
+	if err != nil || status != http.StatusConflict || responseErrorCode(reusedBody) != "IDEMPOTENCY_KEY_REUSED" {
+		return false
+	}
+	status, _, err = doRequest(http.MethodDelete, serverURL+"/api/v1/holds/"+holdID, "not-the-owner", "", nil)
+	if err != nil || status != http.StatusForbidden {
+		return false
+	}
+	keyExists, err := deps.Redis.Exists(ctx, seatlock.SeatKey(fixture.showtime.Hex(), fixture.idempotencySeat.Hex())).Result()
+	if err != nil || keyExists != 1 {
+		return false
+	}
+	status, _, err = doRequest(http.MethodDelete, serverURL+"/api/v1/holds/"+holdID, owner, "", nil)
+	return err == nil && status == http.StatusOK
+}
+
+func verifyConfirmationKeyScope(ctx context.Context, deps *bootstrap.Dependencies, serverURL string, fixture fixtureIDs, owner, existingKey string) bool {
+	endpoint := serverURL + "/api/v1/showtimes/" + fixture.showtime.Hex() + "/holds"
+	status, raw, err := request(endpoint, owner, uuid.NewString(), map[string]any{"seat_ids": []string{fixture.confirmationIdempotencySeat.Hex()}})
+	if err != nil || status != http.StatusCreated {
+		return false
+	}
+	var envelope apiEnvelope
+	if json.Unmarshal(raw, &envelope) != nil {
+		return false
+	}
+	holdID := fmt.Sprint(envelope.Data["hold_id"])
+	status, body, err := request(serverURL+"/api/v1/holds/"+holdID+"/confirm", owner, existingKey, map[string]any{"payment_method": "MOCK"})
+	if err != nil || status != http.StatusConflict || responseErrorCode(body) != "IDEMPOTENCY_KEY_REUSED" {
+		return false
+	}
+	var hold domain.Hold
+	id, _ := primitive.ObjectIDFromHex(holdID)
+	if err := deps.Store.DB.Collection("holds").FindOne(ctx, bson.M{"_id": id}).Decode(&hold); err != nil || hold.Status != domain.HoldActive {
+		return false
+	}
+	status, _, err = doRequest(http.MethodDelete, serverURL+"/api/v1/holds/"+holdID, owner, "", nil)
+	return err == nil && status == http.StatusOK
 }
 
 func verifyManualRelease(ctx context.Context, deps *bootstrap.Dependencies, serverURL string, fixture fixtureIDs) bool {
@@ -335,7 +486,8 @@ func verifyExpiration(ctx context.Context, deps *bootstrap.Dependencies, serverU
 		if hold.Status == domain.HoldExpired && seat.Status == domain.SeatAvailable {
 			timeoutAudits, _ := deps.Store.DB.Collection("audit_logs").CountDocuments(ctx, bson.M{"entity_id": holdID, "event_type": "BOOKING_TIMEOUT"})
 			releaseAudits, _ := deps.Store.DB.Collection("audit_logs").CountDocuments(ctx, bson.M{"entity_id": holdID, "event_type": "SEAT_RELEASED"})
-			return timeoutAudits == 1 && releaseAudits == 1
+			confirmStatus, _, confirmErr := request(serverURL+"/api/v1/holds/"+holdID+"/confirm", "expiration", uuid.NewString(), map[string]any{"payment_method": "MOCK"})
+			return timeoutAudits == 1 && releaseAudits == 1 && confirmErr == nil && confirmStatus == http.StatusConflict
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -433,6 +585,12 @@ func seatLabels(seats []domain.BookingSeat) string {
 
 func request(baseURL, token, key string, body any) (int, []byte, error) {
 	return doRequest(http.MethodPost, baseURL, token, key, body)
+}
+
+func responseErrorCode(payload []byte) string {
+	var envelope errorEnvelope
+	_ = json.Unmarshal(payload, &envelope)
+	return envelope.Error.Code
 }
 
 func doRequest(method, baseURL, token, key string, body any) (int, []byte, error) {

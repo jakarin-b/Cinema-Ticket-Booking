@@ -3,7 +3,7 @@ name: cinema-ticket-booking
 x-backend-environment: &backend-environment
   APP_ENV: ${APP_ENV:-development}
   HTTP_PORT: "8080"
-  WORKER_METRICS_PORT: "9091"
+  WORKER_HEALTH_PORT: "9091"
   FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
   ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
   MONGODB_URI: mongodb://mongodb:27017/?replicaSet=rs0
@@ -34,9 +34,6 @@ x-backend-environment: &backend-environment
   COOKIE_SECURE: ${COOKIE_SECURE:-false}
   HOLD_RATE_LIMIT: ${HOLD_RATE_LIMIT:-10}
   LOG_LEVEL: ${LOG_LEVEL:-info}
-  OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
-  OTEL_EXPORTER_OTLP_INSECURE: "true"
-  OTEL_TRACES_ENABLED: ${OTEL_TRACES_ENABLED:-true}
 
 services:
   mongodb:
@@ -129,8 +126,6 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-      otel-collector:
-        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/health/live"]
       interval: 5s
@@ -155,8 +150,6 @@ services:
         condition: service_healthy
       mailpit:
         condition: service_started
-      otel-collector:
-        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9091/health/live"]
       interval: 5s
@@ -172,7 +165,6 @@ services:
     entrypoint: ["/app/concurrency-test"]
     environment:
       <<: *backend-environment
-      OTEL_TRACES_ENABLED: "false"
       MAILPIT_API_URL: http://mailpit:8025
       HOLD_RATE_LIMIT: "100"
       SEAT_LOCK_TTL: "2s"
@@ -219,39 +211,7 @@ services:
       - "8081:8080"
     restart: unless-stopped
 
-  prometheus:
-    image: prom/prometheus:v2.55.1
-    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
-    volumes:
-      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    ports:
-      - "9090:9090"
-    depends_on:
-      api:
-        condition: service_healthy
-    restart: unless-stopped
-
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.116.1
-    command: ["--config=/etc/otelcol/config.yaml"]
-    volumes:
-      - ./deploy/otel-collector.yaml:/etc/otelcol/config.yaml:ro
-    depends_on:
-      jaeger:
-        condition: service_started
-    restart: unless-stopped
-
-  jaeger:
-    image: jaegertracing/all-in-one:1.64.0
-    environment:
-      COLLECTOR_OTLP_ENABLED: "true"
-    ports:
-      - "16686:16686"
-    restart: unless-stopped
-
 volumes:
   mongo-data:
   redis-data:
   rabbit-data:
-  prometheus-data:

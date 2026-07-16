@@ -109,8 +109,8 @@
   ],
   "item": [
     {
-      "name": "01 - Health & Observability",
-      "description": "Public health and metrics endpoints for the API and background worker.",
+      "name": "01 - Health",
+      "description": "Public health endpoints for the API and background worker.",
       "item": [
         {
           "name": "API liveness",
@@ -176,30 +176,6 @@
           }
         },
         {
-          "name": "API metrics",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
-                  "pm.test('Prometheus metrics are returned', () => pm.expect(pm.response.text()).to.include('# HELP'));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "auth": {
-              "type": "noauth"
-            },
-            "method": "GET",
-            "header": [],
-            "url": "{{base_url}}/metrics",
-            "description": "Prometheus metrics exposed by the API process."
-          }
-        },
-        {
           "name": "Worker liveness",
           "event": [
             {
@@ -227,30 +203,6 @@
             ],
             "url": "{{worker_url}}/health/live",
             "description": "Checks whether the outbox and notification worker is running."
-          }
-        },
-        {
-          "name": "Worker metrics",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
-                  "pm.test('Prometheus metrics are returned', () => pm.expect(pm.response.text()).to.include('# HELP'));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "auth": {
-              "type": "noauth"
-            },
-            "method": "GET",
-            "header": [],
-            "url": "{{worker_url}}/metrics",
-            "description": "Prometheus metrics exposed by the worker process."
           }
         }
       ]

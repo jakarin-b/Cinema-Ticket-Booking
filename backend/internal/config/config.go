@@ -13,7 +13,7 @@ import (
 type Config struct {
 	AppEnv              string
 	HTTPPort            string
-	WorkerMetricsPort   string
+	WorkerHealthPort    string
 	FrontendURL         string
 	AllowedOrigins      []string
 	MongoURI            string
@@ -44,9 +44,6 @@ type Config struct {
 	CookieSecure        bool
 	HoldRateLimit       int
 	LogLevel            string
-	OTLPEndpoint        string
-	OTLPInsecure        bool
-	TracesEnabled       bool
 }
 
 func Load() (Config, error) {
@@ -82,7 +79,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		AppEnv:              env("APP_ENV", "development"),
 		HTTPPort:            env("HTTP_PORT", "8080"),
-		WorkerMetricsPort:   env("WORKER_METRICS_PORT", "9091"),
+		WorkerHealthPort:    env("WORKER_HEALTH_PORT", "9091"),
 		FrontendURL:         strings.TrimRight(env("FRONTEND_URL", "http://localhost:3000"), "/"),
 		AllowedOrigins:      csv(env("ALLOWED_ORIGINS", "http://localhost:3000")),
 		MongoURI:            env("MONGODB_URI", "mongodb://localhost:27017/?replicaSet=rs0"),
@@ -113,9 +110,6 @@ func Load() (Config, error) {
 		CookieSecure:        boolean("COOKIE_SECURE", false),
 		HoldRateLimit:       rate,
 		LogLevel:            env("LOG_LEVEL", "info"),
-		OTLPEndpoint:        env("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
-		OTLPInsecure:        boolean("OTEL_EXPORTER_OTLP_INSECURE", true),
-		TracesEnabled:       boolean("OTEL_TRACES_ENABLED", true),
 	}
 	if cfg.SeatLockTTL <= 0 || cfg.HoldSweepInterval <= 0 || cfg.SessionTTL <= 0 || cfg.OAuthStateTTL <= 0 {
 		return Config{}, errors.New("duration settings must be positive")

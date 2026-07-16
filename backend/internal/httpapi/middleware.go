@@ -11,7 +11,6 @@ import (
 	appauth "github.com/cinema-ticket-booking/backend/internal/auth"
 	"github.com/cinema-ticket-booking/backend/internal/config"
 	"github.com/cinema-ticket-booking/backend/internal/domain"
-	"github.com/cinema-ticket-booking/backend/internal/observability"
 	"github.com/cinema-ticket-booking/backend/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -54,15 +53,10 @@ func SecurityHeaders(cfg config.Config) gin.HandlerFunc {
 	}
 }
 
-func RequireAuth(authService *appauth.Service, metrics *observability.Metrics) gin.HandlerFunc {
+func RequireAuth(authService *appauth.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		principal, err := authenticate(c, authService)
 		if err != nil {
-			method := "google_oauth"
-			if bearer(c) != "" {
-				method = "firebase"
-			}
-			metrics.Authentication.WithLabelValues(method, "failure").Inc()
 			fail(c, &service.Error{Status: http.StatusUnauthorized, Code: "UNAUTHENTICATED", Message: "Authentication is required."})
 			c.Abort()
 			return
@@ -75,7 +69,6 @@ func RequireAuth(authService *appauth.Service, metrics *observability.Metrics) g
 				return
 			}
 		}
-		metrics.Authentication.WithLabelValues(principal.Method, "success").Inc()
 		c.Set(principalKey, principal)
 		c.Next()
 	}

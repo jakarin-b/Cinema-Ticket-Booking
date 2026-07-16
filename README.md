@@ -1,6 +1,6 @@
 # Cinema Ticket Booking System
 
-A full-stack take-home assignment focused on the hard part of cinema booking: preserving correct seat ownership when many clients race for the same seat. The system uses Redis for atomic distributed holds, MongoDB transactions and conditional writes for durable state, WebSockets for live seat maps, and a transactional RabbitMQ outbox for booking notifications.
+A full-stack focused on the hard part of cinema booking: preserving correct seat ownership when many clients race for the same seat. The system uses Redis for atomic distributed holds, MongoDB transactions and conditional writes for durable state, WebSockets for live seat maps, and a transactional RabbitMQ outbox for booking notifications.
 
 ## Architecture
 
@@ -18,10 +18,6 @@ flowchart LR
     Worker -->|publisher confirms| Rabbit[(RabbitMQ)]
     Rabbit -->|manual ack / retry / DLQ| Worker
     Worker -->|booking confirmation| SMTP[SMTP / Mailpit]
-    API --> OTEL[OpenTelemetry Collector]
-    Worker --> OTEL
-    OTEL --> Jaeger[Jaeger]
-    Prometheus[Prometheus] -->|scrape| API
 ```
 
 The deployable application remains one API, one background worker, and one frontend. MongoDB is a single-node local replica set so the four critical state transitions can use multi-document transactions.
@@ -35,7 +31,7 @@ The deployable application remains one API, one background worker, and one front
 - **SMTP + Mailpit** for asynchronous booking-confirmation email and a credential-free local inbox.
 - **Vue 3 + TypeScript + Vite + Pinia** for the reviewer interface.
 - **Firebase Authentication and direct Google OpenID Connect** as two separate login paths that link to one local user.
-- **Docker Compose, Prometheus, OpenTelemetry, and Jaeger** for local delivery and inspection.
+- **Docker Compose** for reproducible local delivery, with structured JSON logs for runtime inspection.
 
 ## Repository structure
 
@@ -46,7 +42,6 @@ backend/
   docs/openapi.yaml    OpenAPI 3.1 contract
 frontend/
   src/                 Vue views, router, auth store, API client, styles
-deploy/                Prometheus and OpenTelemetry configuration
 docs/                  architecture, threat model, Postman, secret rotation
 scripts/               Mongo replica initialization and verification
 docker-compose.yml     complete local topology
@@ -79,12 +74,10 @@ Local URLs:
 - Frontend: <http://localhost:3000>
 - API: <http://localhost:8080>
 - API readiness: <http://localhost:8080/health/ready>
-- Worker metrics/health: <http://localhost:9091/metrics>
+- Worker health: <http://localhost:9091/health/live>
 - Swagger UI: <http://localhost:8081>
 - RabbitMQ management: <http://localhost:15672>
 - Mailpit inbox: <http://localhost:8025>
-- Prometheus: <http://localhost:9090>
-- Jaeger: <http://localhost:16686>
 
 The application can start without cloud credentials so its public catalogue and infrastructure can be inspected, but `/health/ready` remains `503` and login endpoints return `AUTH_PROVIDER_UNAVAILABLE` until both providers are configured. There is intentionally no development authentication bypass.
 
@@ -154,17 +147,17 @@ Each provider identity is unique by `(provider, subject)`. A new identity may at
 1. **Authenticate the user.** The user signs in through Firebase or direct Google OAuth. Firebase requests send the verified ID token as a Bearer token. Direct OAuth requests use the opaque `cinema_session` cookie, and mutating requests must also send the session-bound `X-CSRF-Token`. The API resolves the provider identity to a server-owned user ID and role; the client cannot submit either value.
 2. **Load the public catalogue.** The frontend requests `GET /api/v1/movies`, selects a movie, and loads its future sessions from `GET /api/v1/movies/:movieId/showtimes`. Only active movies and active showtimes whose start time is still in the future are returned.
 3. **Load the authoritative seat map.** `GET /api/v1/showtimes/:showtimeId/seats` reads the materialized seat state from MongoDB. Each item contains the auditorium seat ID, label, server-owned price, and current `AVAILABLE`, `LOCKED`, or `BOOKED` status.
-4. **Subscribe to live changes.** The frontend connects to `GET /api/v1/ws/showtimes/:showtimeId`. The server immediately sends a MongoDB snapshot and then forwards `seat.locked`, `seat.released`, and `seat.booked` hints received through Redis Pub/Sub. If the connection is interrupted, the client refetches the REST seat map because MongoDB remains authoritative.
+4. **Subscribe to live changes.** The frontend connects to `GET /api/v1/ws/showtimes/:showtimeId`. Receiving the initial snapshot proves that the connection has joined its showtime room; the client then refetches the authoritative REST seat map while buffering `seat.locked`, `seat.released`, and `seat.booked` hints. It replays those hints after the REST response, and repeats the same synchronization after reconnects.
 5. **Select seats locally.** The user selects between one and ten seats currently shown as `AVAILABLE`. The UI treats this as a proposal only: it does not assume the seats are still free and cannot provide a trusted price, lock owner, or expiration time.
-6. **Submit the hold request.** The frontend calls `POST /api/v1/showtimes/:showtimeId/holds` with the selected `seat_ids`, a new UUID in `Idempotency-Key`, and the authentication headers. The hold rate limiter is applied per authenticated user and client IP before the booking service runs.
-7. **Validate idempotency and input.** A missing `Idempotency-Key` returns `400`. If the same user already used that key, the API returns the existing hold with `200 OK`. Otherwise it parses, deduplicates, and sorts the seat IDs, rejects malformed or out-of-range seat selections with `422`, and verifies that the requested showtime is active, has not started, and owns every requested seat.
+6. **Submit the hold request.** The frontend calls `POST /api/v1/showtimes/:showtimeId/holds` with the selected `seat_ids`, a new UUID in `Idempotency-Key`, and the authentication headers. It keeps the key and normalized seat fingerprint in `sessionStorage` until a successful response, so a reload after response loss automatically resubmits the same request. The hold rate limiter is applied per authenticated user and client IP before the booking service runs.
+7. **Validate idempotency and input.** A missing or malformed UUID `Idempotency-Key` returns `400`. Reusing a key for the same normalized showtime and seat request returns the existing hold with `200 OK`; reusing it for a different request returns `409 IDEMPOTENCY_KEY_REUSED`. Otherwise the API parses, deduplicates, and sorts the seat IDs, rejects malformed or out-of-range seat selections with `422`, and verifies that the requested showtime is active, has not started, and owns every requested seat.
 8. **Acquire all Redis locks atomically.** One ownership value containing the new hold ID, user ID, and random lock token is prepared for every requested showtime-seat key. A Lua script first checks every key and writes all keys with the five-minute TTL only when all are free. If any seat is already owned, no key is written and the API returns `409 SEAT_UNAVAILABLE`.
 9. **Persist the active hold.** After Redis acquisition, a MongoDB transaction conditionally changes exactly the requested seats from `AVAILABLE` or expired `LOCKED` to `LOCKED`, attaches the hold and user ownership, stores `lock_expires_at`, and inserts one `ACTIVE` hold. An exact modified-count check prevents partial multi-seat holds.
 10. **Compensate if durable persistence fails.** If the MongoDB transaction aborts or updates fewer seats than requested, the API deletes only Redis keys whose values still match this hold's ownership token. It records a `SYSTEM_ERROR` when appropriate and returns an error without exposing a partially created hold.
 11. **Return and broadcast the hold.** A new hold returns `201 Created` with `hold_id`, `showtime_id`, `seat_ids`, `status`, server-generated `expires_at`, and `remaining_seconds`. The API publishes `seat.locked` through Redis Pub/Sub so every API instance can update its WebSocket clients and disable those seats.
 12. **Display checkout using server time.** The frontend navigates to checkout and counts down from `expires_at`; the browser clock is presentational only. `GET /api/v1/holds/:holdId` can refresh the owned hold and remaining time. The only supported payment method is the deterministic mock method `MOCK`.
-13. **Submit confirmation.** Before the hold expires, the frontend calls `POST /api/v1/holds/:holdId/confirm` with `{ "payment_method": "MOCK" }` and a separate confirmation `Idempotency-Key`. Reusing that key returns the existing booking with `200 OK`; the first successful confirmation returns `201 Created`.
-14. **Revalidate ownership and expiration.** The API loads the hold, verifies that the current user owns it, checks that it is still `ACTIVE` and unexpired, and uses Redis Lua verification to ensure every seat key still contains the expected ownership value. A released, expired, or ownership-mismatched hold returns `409 HOLD_EXPIRED` and cannot reach the booking transaction.
+13. **Submit confirmation.** Before the hold expires, the frontend calls `POST /api/v1/holds/:holdId/confirm` with `{ "payment_method": "MOCK" }` and a separate confirmation `Idempotency-Key` retained in `sessionStorage` until success. Repeating the same hold returns its existing booking with `200 OK`, including after a response loss or reload; using an existing confirmation key for a different hold returns `409 IDEMPOTENCY_KEY_REUSED`. The first successful confirmation returns `201 Created`.
+14. **Revalidate ownership and expiration.** The API loads the hold, verifies that the current user owns it, checks that it is still `ACTIVE` and unexpired, and uses Redis Lua verification to ensure every seat key still contains the expected ownership value. The MongoDB transaction takes a fresh server timestamp and repeats the hold and seat expiration conditions before committing. A released, expired, or ownership-mismatched hold returns `409 HOLD_EXPIRED`.
 15. **Build trusted booking data.** The server reloads the showtime seats, movie, and auditorium from MongoDB, sorts the seat labels, and calculates the total from stored seat prices. User identity, movie title, showtime, auditorium, prices, total, and currency are never accepted from the confirmation body.
 16. **Commit the booking atomically.** One MongoDB transaction conditionally changes the hold from `ACTIVE` to `CONFIRMED`, changes exactly its still-owned and unexpired seats from `LOCKED` to `BOOKED`, inserts the immutable booking, writes a `BOOKING_SUCCESS` audit log, and inserts a `PENDING` `booking.confirmed` outbox event. If any required state changed concurrently, the whole transaction aborts and no booking is created.
 17. **Clean up locks and update clients.** After the transaction commits, the API ownership-safely removes the Redis seat keys and publishes `seat.booked` with the booking ID. The HTTP response returns the booking number, selected seats, total amount in minor THB units, payment status, and booking status. Clients can then use `GET /api/v1/bookings/me` or `GET /api/v1/bookings/:bookingId` to read the durable result.
@@ -197,7 +190,7 @@ MongoDB is authoritative. The protection layers are:
 1. Atomic Redis multi-key acquisition.
 2. Conditional `AVAILABLE`/expired-`LOCKED` to `LOCKED` updates.
 3. Replica-set transactions for hold, release, confirmation, and expiration.
-4. Exact modified-count checks for every multi-seat transition.
+4. Exact modified-count checks for hold creation and confirmation, where every requested seat must transition together; release and expiration remain safely guarded by matching `hold_id` so stale work may update zero seats.
 5. `LOCKED` to `BOOKED` requires the same hold, user, and an unexpired timestamp.
 6. Expiration releases only `LOCKED` seats whose `hold_id` still matches.
 7. Unique showtime-seat, hold idempotency, booking hold, confirmation idempotency, and booking-number indexes.
@@ -210,7 +203,7 @@ Redis naturally expires the coordination key. Every five seconds the worker scan
 
 ## WebSocket consistency
 
-`GET /api/v1/ws/showtimes/:showtimeId` groups connections by showtime and immediately sends a MongoDB `snapshot`. API and worker processes publish `seat.locked`, `seat.released`, and `seat.booked` through Redis Pub/Sub. The API hub sends heartbeat pings, removes disconnected or backpressured clients, and never includes another user's identity.
+`GET /api/v1/ws/showtimes/:showtimeId` groups connections by showtime and immediately sends a MongoDB `snapshot`. The frontend treats it as a registration barrier, fetches a fresh REST snapshot, buffers concurrent incremental events, and replays them after the REST result. API and worker processes publish `seat.locked`, `seat.released`, and `seat.booked` through Redis Pub/Sub. The API hub sends heartbeat pings, removes disconnected or backpressured clients, and never includes another user's identity.
 
 Pub/Sub and WebSockets are acceleration paths, not authoritative storage. The frontend refetches the complete seat map after reconnect to recover missed events.
 
@@ -263,7 +256,7 @@ Exercise the production WebSocket snapshot and Redis Pub/Sub fan-out:
 make test-websocket
 ```
 
-It creates an isolated future showtime, drives 50 simultaneous authenticated HTTP hold requests through the real router and middleware with an injected test verifier, confirms the winner twice with one idempotency key, inspects MongoDB, and exits nonzero unless it observes:
+It creates an isolated future showtime, drives 50 simultaneous authenticated HTTP hold requests through the real router and middleware with an injected test verifier, confirms the winner concurrently and repeats confirmation with a new key, inspects MongoDB, and exits nonzero unless it observes:
 
 ```text
 Total attempts: 50
@@ -274,13 +267,17 @@ Double booking detected: false
 Booking email delivered: true
 Duplicate booking email suppressed: true
 Booked seat protected: true
+Concurrent/repeated confirmation verified: true
+Atomic multi-seat acquisition verified: true
+Hold idempotency and ownership verified: true
+Confirmation idempotency scope verified: true
 Manual release verified: true
 Expiration verified: true
 Authentication linking/session/CSRF/role checks verified: true
 RabbitMQ mandatory routing verified: true
 ```
 
-Run clean startup smoke verification:
+Run non-destructive startup and acceptance verification (existing Docker volumes are preserved):
 
 ```bash
 make verify

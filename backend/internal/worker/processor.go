@@ -13,17 +13,12 @@ import (
 	"github.com/cinema-ticket-booking/backend/internal/domain"
 	"github.com/cinema-ticket-booking/backend/internal/mailer"
 	"github.com/cinema-ticket-booking/backend/internal/messaging"
-	"github.com/cinema-ticket-booking/backend/internal/observability"
 	"github.com/cinema-ticket-booking/backend/internal/service"
 	"github.com/rabbitmq/amqp091-go"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 )
 
 type Processor struct {
@@ -32,11 +27,10 @@ type Processor struct {
 	rabbit  *messaging.Rabbit
 	sender  mailer.Sender
 	cfg     config.Config
-	metrics *observability.Metrics
 }
 
-func NewProcessor(store *database.Store, booking *service.BookingService, rabbit *messaging.Rabbit, sender mailer.Sender, cfg config.Config, metrics *observability.Metrics) *Processor {
-	return &Processor{store: store, booking: booking, rabbit: rabbit, sender: sender, cfg: cfg, metrics: metrics}
+func NewProcessor(store *database.Store, booking *service.BookingService, rabbit *messaging.Rabbit, sender mailer.Sender, cfg config.Config) *Processor {
+	return &Processor{store: store, booking: booking, rabbit: rabbit, sender: sender, cfg: cfg}
 }
 
 func (p *Processor) RunExpiration(ctx context.Context) {
@@ -47,17 +41,12 @@ func (p *Processor) RunExpiration(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			runCtx, span := otel.Tracer("cinema-worker").Start(ctx, "holds.expiration_sweep")
-			count, err := p.booking.ExpireDueHolds(runCtx, 100)
-			span.SetAttributes(attribute.Int("holds.expired", count))
+			count, err := p.booking.ExpireDueHolds(ctx, 100)
 			if err != nil {
-				span.RecordError(err)
-				span.SetStatus(codes.Error, "expiration sweep failed")
 				slog.Error("expiration sweep failed", "error", err)
 			} else if count > 0 {
 				slog.Info("expired holds processed", "count", count)
 			}
-			span.End()
 		}
 	}
 }
@@ -70,7 +59,6 @@ func (p *Processor) RunOutbox(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.updateOutboxLag(ctx)
 			for i := 0; i < 20; i++ {
 				event, err := p.claimOutbox(ctx)
 				if err == mongo.ErrNoDocuments {
@@ -80,14 +68,9 @@ func (p *Processor) RunOutbox(ctx context.Context) {
 					slog.Error("outbox claim failed", "error", err)
 					break
 				}
-				publishCtx, span := otel.Tracer("cinema-worker").Start(ctx, "outbox.publish", traceEventAttributes(event)...)
-				if err := p.publishOutbox(publishCtx, event); err != nil {
-					span.RecordError(err)
-					span.SetStatus(codes.Error, "outbox publish failed")
-					p.metrics.OutboxFailures.Inc()
+				if err := p.publishOutbox(ctx, event); err != nil {
 					slog.Error("outbox publish failed", "event_id", event.EventID, "error", err)
 				}
-				span.End()
 			}
 		}
 	}
@@ -110,9 +93,6 @@ func (p *Processor) publishOutbox(ctx context.Context, event *domain.OutboxEvent
 	now := time.Now().UTC()
 	if err == nil {
 		_, updateErr := p.store.DB.Collection("outbox_events").UpdateOne(ctx, bson.M{"_id": event.ID, "status": "PROCESSING"}, bson.M{"$set": bson.M{"status": "PUBLISHED", "published_at": now}, "$unset": bson.M{"lease_until": "", "last_error": ""}})
-		if updateErr == nil {
-			p.metrics.OutboxPublished.Inc()
-		}
 		return updateErr
 	}
 	backoff := time.Duration(math.Min(math.Pow(2, float64(event.Attempts)), 60)) * time.Second
@@ -134,15 +114,12 @@ func (p *Processor) RunNotifications(ctx context.Context) error {
 			if !ok {
 				return fmt.Errorf("notification delivery channel closed")
 			}
-			deliveryCtx, span := otel.Tracer("cinema-worker").Start(ctx, "notification.consume")
 			retryCount := headerInt(delivery.Headers["x-retry-count"])
-			span.SetAttributes(attribute.Int("messaging.retry_count", retryCount))
-			if err := p.notify(deliveryCtx, delivery.Body); err == nil {
+			if err := p.notify(ctx, delivery.Body); err == nil {
 				_ = delivery.Ack(false)
-				span.End()
 				continue
 			} else {
-				span.RecordError(err)
+				slog.Warn("notification delivery failed", "retry_count", retryCount, "error", err)
 			}
 			retry := retryCount + 1
 			if retry <= 3 {
@@ -151,52 +128,17 @@ func (p *Processor) RunNotifications(ctx context.Context) error {
 					headers = amqp091.Table{}
 				}
 				headers["x-retry-count"] = int32(retry)
-				if err := p.rabbit.PublishRetry(deliveryCtx, retry, delivery.Body, headers); err == nil {
-					p.metrics.NotificationRetries.Inc()
+				if err := p.rabbit.PublishRetry(ctx, retry, delivery.Body, headers); err == nil {
 					_ = delivery.Ack(false)
-					span.SetAttributes(attribute.Int("messaging.next_retry", retry))
-					span.End()
 					continue
 				} else {
-					span.RecordError(err)
+					slog.Error("notification retry publish failed", "retry_count", retry, "error", err)
 				}
 			}
-			p.metrics.DLQMessages.Inc()
 			_ = delivery.Nack(false, false)
-			span.SetStatus(codes.Error, "notification dead-lettered")
-			span.End()
+			slog.Error("notification dead-lettered", "retry_count", retry)
 		}
 	}
-}
-
-func (p *Processor) updateOutboxLag(ctx context.Context) {
-	var event domain.OutboxEvent
-	err := p.store.DB.Collection("outbox_events").FindOne(
-		ctx,
-		bson.M{"status": bson.M{"$in": bson.A{"PENDING", "PROCESSING"}}},
-		options.FindOne().SetSort(bson.D{{Key: "created_at", Value: 1}}).SetProjection(bson.M{"created_at": 1}),
-	).Decode(&event)
-	if err == mongo.ErrNoDocuments {
-		p.metrics.OutboxLag.Set(0)
-		return
-	}
-	if err != nil {
-		slog.Warn("outbox lag query failed", "error", err)
-		return
-	}
-	lag := time.Since(event.CreatedAt).Seconds()
-	if lag < 0 {
-		lag = 0
-	}
-	p.metrics.OutboxLag.Set(lag)
-}
-
-func traceEventAttributes(event *domain.OutboxEvent) []trace.SpanStartOption {
-	return []trace.SpanStartOption{trace.WithAttributes(
-		attribute.String("messaging.message.id", event.EventID),
-		attribute.String("messaging.destination.name", event.EventType),
-		attribute.Int("messaging.message.retry_count", event.Attempts),
-	)}
 }
 
 func (p *Processor) notify(ctx context.Context, payload []byte) error {

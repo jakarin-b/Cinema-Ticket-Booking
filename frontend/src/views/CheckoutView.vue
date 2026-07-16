@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { api, idempotencyKey, localDate, money } from "@/api/client";
+import { api, clearIdempotencyKey, localDate, money, stableIdempotencyKey } from "@/api/client";
 import type { Booking, Hold, Seat, ShowtimeDetail } from "@/types";
 const route = useRoute();
 const router = useRouter();
@@ -53,10 +53,11 @@ async function confirm() {
     const booking = (
       await api<Booking>(`/holds/${holdId}/confirm`, {
         method: "POST",
-        headers: { "Idempotency-Key": idempotencyKey() },
+        headers: { "Idempotency-Key": stableIdempotencyKey(`confirm:${holdId}`, "MOCK") },
         body: JSON.stringify({ payment_method: "MOCK" }),
       })
     ).data;
+    clearIdempotencyKey(`confirm:${holdId}`);
     sessionStorage.removeItem(`hold:${holdId}`);
     await router.replace(`/bookings/${booking.id}`);
   } catch (cause) {
@@ -70,6 +71,7 @@ async function release() {
   busy.value = true;
   try {
     await api(`/holds/${holdId}`, { method: "DELETE" });
+    clearIdempotencyKey(`confirm:${holdId}`);
     sessionStorage.removeItem(`hold:${holdId}`);
     await router.replace(`/showtimes/${hold.value?.showtime_id}/seats`);
   } catch (cause) {

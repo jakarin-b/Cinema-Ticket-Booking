@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { api, idempotencyKey, localDate, money } from "@/api/client";
+import { ApiError, api, clearIdempotencyKey, localDate, money, savedIdempotencyFingerprint, stableIdempotencyKey } from "@/api/client";
 import type { Hold, Seat, ShowtimeDetail } from "@/types";
+type SeatEvent = { type: string; data?: { seat_ids?: string[] } };
 const route = useRoute();
 const router = useRouter();
 const id = String(route.params.id);
@@ -15,6 +16,10 @@ const holding = ref(false);
 let socket: WebSocket | undefined;
 let reconnectTimer: number | undefined;
 let closed = false;
+let connectionGeneration = 0;
+let synchronizationRequest = 0;
+let syncing = false;
+let bufferedEvents: SeatEvent[] = [];
 const rows = computed(() =>
   seats.value.reduce<Record<string, Seat[]>>((grouped, seat) => {
     (grouped[seat.row] ??= []).push(seat);
@@ -33,13 +38,8 @@ function toggle(seat: Seat) {
   next.has(seat.seat_id) ? next.delete(seat.seat_id) : next.add(seat.seat_id);
   selected.value = next;
 }
-async function load() {
-  const [show, seatMap] = await Promise.all([
-    api<ShowtimeDetail>(`/showtimes/${id}`),
-    api<Seat[]>(`/showtimes/${id}/seats`),
-  ]);
-  detail.value = show.data;
-  seats.value = seatMap.data;
+async function loadDetail() {
+  detail.value = (await api<ShowtimeDetail>(`/showtimes/${id}`)).data;
 }
 function apply(ids: string[], status: Seat["status"]) {
   seats.value = seats.value.map((seat) =>
@@ -53,20 +53,59 @@ function apply(ids: string[], status: Seat["status"]) {
     notice.value = "Another customer just took one of your selected seats.";
   }
 }
+function applyEvent(message: SeatEvent) {
+  const ids = message.data?.seat_ids ?? [];
+  if (message.type === "seat.locked") apply(ids, "LOCKED");
+  else if (message.type === "seat.released") apply(ids, "AVAILABLE");
+  else if (message.type === "seat.booked") apply(ids, "BOOKED");
+}
+async function synchronizeSeats(generation: number) {
+  const request = ++synchronizationRequest;
+  syncing = true;
+  try {
+    const current = (await api<Seat[]>(`/showtimes/${id}/seats`)).data;
+    if (generation !== connectionGeneration || request !== synchronizationRequest || closed) return;
+    seats.value = current;
+    const pending = bufferedEvents;
+    bufferedEvents = [];
+    pending.forEach(applyEvent);
+    syncing = false;
+  } catch (cause) {
+    if (generation !== connectionGeneration || request !== synchronizationRequest || closed) return;
+    syncing = false;
+    error.value = cause instanceof Error ? cause.message : "Seat map could not be synchronized.";
+    socket?.close();
+  }
+}
 function connect(attempt = 0) {
+  const generation = ++connectionGeneration;
+  syncing = true;
+  bufferedEvents = [];
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  socket = new WebSocket(`${protocol}://${location.host}/api/v1/ws/showtimes/${id}`);
-  socket.onmessage = (event) => {
-    const message = JSON.parse(event.data);
-    if (message.type === "snapshot") seats.value = message.data.seats;
-    else if (message.type === "seat.locked") apply(message.data.seat_ids, "LOCKED");
-    else if (message.type === "seat.released") apply(message.data.seat_ids, "AVAILABLE");
-    else if (message.type === "seat.booked") apply(message.data.seat_ids, "BOOKED");
+  const connection = new WebSocket(`${protocol}://${location.host}/api/v1/ws/showtimes/${id}`);
+  socket = connection;
+  let snapshotSeen = false;
+  connection.onmessage = (event) => {
+    if (generation !== connectionGeneration || connection !== socket || closed) return;
+    let message: SeatEvent;
+    try {
+      message = JSON.parse(String(event.data)) as SeatEvent;
+    } catch {
+      return;
+    }
+    if (message.type === "snapshot") {
+      if (!snapshotSeen) {
+        snapshotSeen = true;
+        void synchronizeSeats(generation);
+      }
+      return;
+    }
+    if (syncing) bufferedEvents.push(message);
+    else applyEvent(message);
   };
-  socket.onclose = () => {
-    if (!closed) {
-      reconnectTimer = window.setTimeout(async () => {
-        await load().catch(() => undefined);
+  connection.onclose = () => {
+    if (!closed && connection === socket) {
+      reconnectTimer = window.setTimeout(() => {
         connect(Math.min(attempt + 1, 5));
       }, Math.min(1000 * 2 ** attempt, 30000));
     }
@@ -76,27 +115,47 @@ async function hold() {
   if (!selected.value.size) return;
   holding.value = true;
   error.value = "";
+  const seatIDs = [...selected.value].sort();
   try {
-    const response = await api<Hold>(`/showtimes/${id}/holds`, {
-      method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey() },
-      body: JSON.stringify({ seat_ids: [...selected.value] }),
-    });
-    sessionStorage.setItem(
-      `hold:${response.data.hold_id}`,
-      JSON.stringify(response.data)
-    );
-    await router.push(`/checkout/${response.data.hold_id}`);
+    await submitHold(seatIDs);
   } catch (cause) {
+    if (cause instanceof ApiError) clearIdempotencyKey(`hold:${id}`);
     error.value = cause instanceof Error ? cause.message : "The seats could not be held.";
-    await load();
+    await synchronizeSeats(connectionGeneration);
   } finally {
     holding.value = false;
   }
 }
+async function submitHold(seatIDs: string[]) {
+  const keyScope = `hold:${id}`;
+  const response = await api<Hold>(`/showtimes/${id}/holds`, {
+    method: "POST",
+    headers: { "Idempotency-Key": stableIdempotencyKey(keyScope, seatIDs.join(",")) },
+    body: JSON.stringify({ seat_ids: seatIDs }),
+  });
+  clearIdempotencyKey(keyScope);
+  await router.push(`/checkout/${response.data.hold_id}`);
+}
 onMounted(async () => {
   try {
-    await load();
+    await loadDetail();
+    const pendingFingerprint = savedIdempotencyFingerprint(`hold:${id}`);
+    const pendingSeatIDs = pendingFingerprint?.split(",").filter(Boolean) ?? [];
+    const validPendingRequest = pendingSeatIDs.length > 0 && pendingSeatIDs.length <= 10 && pendingSeatIDs.every((seatID) => /^[a-f0-9]{24}$/.test(seatID));
+    if (validPendingRequest) {
+      holding.value = true;
+      try {
+        await submitHold(pendingSeatIDs);
+        return;
+      } catch (cause) {
+        if (cause instanceof ApiError) clearIdempotencyKey(`hold:${id}`);
+        error.value = cause instanceof Error ? cause.message : "The pending hold could not be recovered.";
+      } finally {
+        holding.value = false;
+      }
+    } else if (pendingFingerprint !== null) {
+      clearIdempotencyKey(`hold:${id}`);
+    }
     connect();
   } catch (cause) {
     error.value =
